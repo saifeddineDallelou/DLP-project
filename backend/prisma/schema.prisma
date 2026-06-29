@@ -1,0 +1,208 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Core models ─────────────────────────────────────────────────────────────
+
+model User {
+  id               String                @id @default(uuid())
+  email            String                @unique
+  passwordHash     String                @map("password_hash")
+  role             Role                  @default(ANALYST)
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
+  auditLogs        AuditLog[]
+  incidents        Incident[]            @relation("AssignedIncidents")
+  behaviorBaseline UserBehaviorBaseline?
+
+  @@map("users")
+}
+
+model Policy {
+  id          String     @id @default(uuid())
+  name        String
+  description String?
+  conditions  Json
+  action      Action     @default(ALERT)
+  severity    Severity   @default(MEDIUM)
+  enabled     Boolean    @default(true)
+  version     Int        @default(1)
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  incidents   Incident[]
+
+  @@map("policies")
+}
+
+model Agent {
+  id             String          @id @default(uuid())
+  hostname       String          @unique
+  os             String
+  version        String          @default("1.0.0")
+  status         AgentStatus     @default(ACTIVE)
+  lastSeen       DateTime?       @map("last_seen")
+  token          String          @unique
+  createdAt      DateTime        @default(now()) @map("created_at")
+  incidents      Incident[]
+  behaviorEvents BehaviorEvent[]
+  aiLeakAttempts AiLeakAttempt[]
+
+  @@map("agents")
+}
+
+model Incident {
+  id           String         @id @default(uuid())
+  agentId      String         @map("agent_id")
+  policyId     String         @map("policy_id")
+  severity     Severity       @default(MEDIUM)
+  channel      Channel
+  status       IncidentStatus @default(OPEN)
+  evidence     Bytes?
+  evidenceType String?        @map("evidence_type")
+  riskScore    Float?         @map("risk_score")
+  assignedToId String?        @map("assigned_to_id")
+  resolvedAt   DateTime?      @map("resolved_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  agent      Agent  @relation(fields: [agentId], references: [id])
+  policy     Policy @relation(fields: [policyId], references: [id])
+  assignedTo User?  @relation("AssignedIncidents", fields: [assignedToId], references: [id])
+
+  @@map("incidents")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?  @map("user_id")
+  action     String
+  resource   String
+  resourceId String?  @map("resource_id")
+  ipAddress  String?  @map("ip_address")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
+
+// ─── UEBA models ─────────────────────────────────────────────────────────────
+
+model UserBehaviorBaseline {
+  id                   String   @id @default(uuid())
+  userId               String   @unique @map("user_id")
+  avgDailyFiles        Float    @map("avg_daily_files")
+  avgDailyVolumeMB     Float    @map("avg_daily_volume_mb")
+  avgWorkingHourStart  Int      @map("avg_working_hour_start")
+  avgWorkingHourEnd    Int      @map("avg_working_hour_end")
+  avgUsbFrequency      Float    @map("avg_usb_frequency")
+  riskScore            Float    @default(0) @map("risk_score")
+  lastUpdated          DateTime @map("last_updated")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("user_behavior_baselines")
+}
+
+model BehaviorEvent {
+  id        String            @id @default(uuid())
+  agentId   String            @map("agent_id")
+  userId    String            @map("user_id")
+  eventType BehaviorEventType @map("event_type")
+  metadata  Json
+  timestamp DateTime          @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@map("behavior_events")
+}
+
+// ─── AI-leak models ───────────────────────────────────────────────────────────
+
+model AiLeakAttempt {
+  id            String    @id @default(uuid())
+  agentId       String    @map("agent_id")
+  platform      AiPlatform
+  method        LeakMethod
+  contentSample String?   @map("content_sample")
+  riskScore     Float     @map("risk_score")
+  blocked       Boolean   @default(true)
+  timestamp     DateTime  @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@map("ai_leak_attempts")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  ANALYST
+  VIEWER
+}
+
+enum Action {
+  ALLOW
+  ALERT
+  BLOCK
+  QUARANTINE
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AgentStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+enum IncidentStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  FALSE_POSITIVE
+}
+
+enum Channel {
+  FILE
+  CLIPBOARD
+  USB
+  PRINT
+  SCREENSHOT
+  NETWORK
+}
+
+enum BehaviorEventType {
+  FILE_ACCESS
+  USB_INSERT
+  CLIPBOARD_COPY
+  SCREENSHOT
+  APP_LAUNCH
+  AFTER_HOURS_ACCESS
+}
+
+enum AiPlatform {
+  CHATGPT
+  CLAUDE
+  GEMINI
+  COPILOT
+  OTHER
+}
+
+enum LeakMethod {
+  CLIPBOARD
+  SCREENSHOT
+  BROWSER
+  EXTENSION
+}
