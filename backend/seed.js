@@ -96,7 +96,7 @@ async function seed() {
     create: {
       id:            'seed-ai-attempt-001',
       agentId:       agent.id,
-      platform:      'CHATGPT',
+      platform:      'OPENAI_CHATGPT',
       method:        'CLIPBOARD',
       contentSample: 'SSN: 123-45-6789, Card: 4111111111111111',
       riskScore:     0.92,

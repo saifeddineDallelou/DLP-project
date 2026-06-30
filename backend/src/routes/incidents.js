@@ -4,6 +4,59 @@ const { authenticate, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
+// POST /api/incidents  (accepts JWT Bearer OR x-agent-token)
+router.post('/', async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const agentToken = req.headers['x-agent-token'];
+
+    if (!authHeader && !agentToken) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    let verifiedAgentId = null;
+
+    if (agentToken) {
+      const agent = await prisma.agent.findFirst({ where: { token: agentToken } });
+      if (!agent) return res.status(401).json({ error: 'Invalid agent token' });
+      verifiedAgentId = agent.id;
+    } else {
+      const jwt = require('jsonwebtoken');
+      try { jwt.verify(authHeader.slice(7), process.env.JWT_SECRET); }
+      catch { return res.status(401).json({ error: 'Invalid token' }); }
+    }
+
+    const { agentId, policyId, severity, channel, evidence, evidenceType, riskScore } = req.body;
+    const resolvedAgentId = verifiedAgentId ?? agentId;
+
+    if (!resolvedAgentId || !policyId || !channel) {
+      return res.status(400).json({ error: 'agentId, policyId and channel are required' });
+    }
+
+    const incident = await prisma.incident.create({
+      data: {
+        agentId:      resolvedAgentId,
+        policyId,
+        severity:     severity     ?? 'MEDIUM',
+        channel:      channel,
+        evidence:     evidence     ? Buffer.from(String(evidence)) : undefined,
+        evidenceType: evidenceType ?? (evidence ? 'text' : undefined),
+        riskScore:    riskScore    ?? null,
+        status:       'OPEN',
+      },
+      include: {
+        agent:  { select: { id: true, hostname: true } },
+        policy: { select: { id: true, name: true } },
+      },
+    });
+
+    res.status(201).json(incident);
+  } catch (err) {
+    if (err.code === 'P2003') return res.status(400).json({ error: 'Invalid agentId or policyId' });
+    next(err);
+  }
+});
+
 // GET /api/incidents  (paginated, filterable)
 router.get('/', authenticate, async (req, res, next) => {
   try {

@@ -3,12 +3,50 @@ import { Brain, RefreshCw, ShieldX, ShieldCheck } from 'lucide-react';
 import api from '../services/api.js';
 import { formatDate } from '../utils/format.js';
 
+const PLATFORMS = [
+  'OPENAI_CHATGPT', 'ANTHROPIC_CLAUDE', 'GOOGLE_GEMINI', 'MICROSOFT_COPILOT',
+  'PERPLEXITY', 'POE', 'CHARACTER_AI', 'MISTRAL', 'GROK', 'META_AI',
+  'DEEPSEEK', 'HUGGINGFACE', 'YOU_COM', 'PI_AI', 'GROQ', 'COHERE', 'OTHER_AI',
+];
+
+const PLATFORM_LABELS = {
+  OPENAI_CHATGPT:    'ChatGPT',
+  ANTHROPIC_CLAUDE:  'Claude',
+  GOOGLE_GEMINI:     'Gemini',
+  MICROSOFT_COPILOT: 'Copilot',
+  PERPLEXITY:        'Perplexity',
+  POE:               'Poe',
+  CHARACTER_AI:      'Character.AI',
+  MISTRAL:           'Mistral',
+  GROK:              'Grok',
+  META_AI:           'Meta AI',
+  DEEPSEEK:          'DeepSeek',
+  HUGGINGFACE:       'HuggingFace',
+  YOU_COM:           'You.com',
+  PI_AI:             'Pi.ai',
+  GROQ:              'Groq',
+  COHERE:            'Cohere',
+  OTHER_AI:          'Other AI',
+};
+
 const PLATFORM_COLORS = {
-  CHATGPT: 'text-emerald-400 bg-emerald-500/10',
-  CLAUDE:  'text-violet-400  bg-violet-500/10',
-  GEMINI:  'text-sky-400     bg-sky-500/10',
-  COPILOT: 'text-blue-400    bg-blue-500/10',
-  OTHER:   'text-slate-400   bg-slate-500/10',
+  OPENAI_CHATGPT:    'text-emerald-400 bg-emerald-500/10',
+  ANTHROPIC_CLAUDE:  'text-violet-400  bg-violet-500/10',
+  GOOGLE_GEMINI:     'text-sky-400     bg-sky-500/10',
+  MICROSOFT_COPILOT: 'text-blue-400    bg-blue-500/10',
+  PERPLEXITY:        'text-orange-400  bg-orange-500/10',
+  POE:               'text-amber-400   bg-amber-500/10',
+  CHARACTER_AI:      'text-pink-400    bg-pink-500/10',
+  MISTRAL:           'text-yellow-400  bg-yellow-500/10',
+  GROK:              'text-red-400     bg-red-500/10',
+  META_AI:           'text-indigo-400  bg-indigo-500/10',
+  DEEPSEEK:          'text-cyan-400    bg-cyan-500/10',
+  HUGGINGFACE:       'text-yellow-300  bg-yellow-400/10',
+  YOU_COM:           'text-teal-400    bg-teal-500/10',
+  PI_AI:             'text-rose-400    bg-rose-500/10',
+  GROQ:              'text-purple-400  bg-purple-500/10',
+  COHERE:            'text-lime-400    bg-lime-500/10',
+  OTHER_AI:          'text-slate-400   bg-slate-500/10',
 };
 
 const METHOD_COLORS = {
@@ -88,8 +126,8 @@ export default function AiPolicy() {
       <div className="mb-4">
         <select className="select" value={filter} onChange={e => setFilter(e.target.value)}>
           <option value="">All Platforms</option>
-          {['CHATGPT','CLAUDE','GEMINI','COPILOT','OTHER'].map(p =>
-            <option key={p} value={p}>{p}</option>
+          {PLATFORMS.map(p =>
+            <option key={p} value={p}>{PLATFORM_LABELS[p] ?? p}</option>
           )}
         </select>
       </div>
@@ -122,8 +160,8 @@ export default function AiPolicy() {
               <tr key={att.id} className="table-row cursor-default">
                 <td className="td">
                   <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold
-                                   ${PLATFORM_COLORS[att.platform] ?? ''}`}>
-                    {att.platform}
+                                   ${PLATFORM_COLORS[att.platform] ?? 'text-slate-400 bg-slate-500/10'}`}>
+                    {PLATFORM_LABELS[att.platform] ?? att.platform}
                   </span>
                 </td>
                 <td className="td">
