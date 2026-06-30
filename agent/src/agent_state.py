@@ -28,6 +28,11 @@ class AgentState:
         with self._lock:
             return (time.monotonic() - self._last_sensitive_clip) < within_seconds
 
+    def sensitive_clip_monotonic(self) -> float:
+        """Return the monotonic timestamp of the last sensitive clipboard flag."""
+        with self._lock:
+            return self._last_sensitive_clip
+
     def pop_counters(self) -> tuple:
         """Return (file_count, clipboard_count) and reset both to zero."""
         with self._lock:

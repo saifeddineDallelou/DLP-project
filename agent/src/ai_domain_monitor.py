@@ -1,6 +1,15 @@
 """
-AI domain monitor: scans ALL open window titles (not just foreground) every 10 s.
-Uses EnumWindows so ChatGPT in Opera GX is detected even when not focused.
+AI domain monitor — 1-second window scan for open AI platforms.
+
+Responsibilities:
+  1. Expose AiBlocker: thread-safe class shared with clipboard_watcher so that
+     a sensitive-clipboard detection can immediately trigger a window check and
+     clipboard clear in the SAME event (sub-second detection-to-block).
+  2. Run a background loop at 1 s to handle the DELAYED case — user copied
+     sensitive content when no AI window was open, then opened one within 30 s.
+
+AiBlocker is created by start_ai_domain_monitor() and returned alongside the
+thread so clipboard_watcher can hold a reference to it.
 """
 
 import sys
@@ -12,14 +21,19 @@ import psutil
 import pyperclip
 from loguru import logger
 
-from api_client import DLPApiClient
+from api_client  import DLPApiClient
 from agent_state import AgentState
 
-_POLL_INTERVAL      = 10.0   # seconds between window scans
-_ALERT_COOLDOWN     = 60.0   # min seconds between API reports for the same platform
-_CLIP_CLEAR_COOLDOWN = 5.0   # min seconds between clipboard clears (prevents spam)
+# ── Tuning constants ──────────────────────────────────────────────────────────
 
-# Keyword → AiPlatform enum value (checked in order — more specific first)
+_POLL_INTERVAL       = 1.0   # seconds between background scans (down from 10 s)
+_ALERT_COOLDOWN      = 60.0  # min seconds between API reports per platform
+_CLIP_CLEAR_COOLDOWN = 5.0   # min seconds between clipboard overwrites
+_PROC_CACHE_TTL      = 2.0   # cache process-list scan for 2 s (called from 2 threads)
+_LOG_STATUS_EVERY    = 10    # log AI status every N polls (= every 10 s)
+
+# ── AI-platform keyword tables ────────────────────────────────────────────────
+
 _WINDOW_KEYWORDS: list[tuple[str, str]] = [
     # OpenAI / ChatGPT
     ("chat.openai.com",        "OPENAI_CHATGPT"),
@@ -29,7 +43,6 @@ _WINDOW_KEYWORDS: list[tuple[str, str]] = [
     # Anthropic / Claude
     ("claude.ai",              "ANTHROPIC_CLAUDE"),
     ("anthropic",              "ANTHROPIC_CLAUDE"),
-    # Note: "claude" alone is skipped here — matched via process name (claude.exe)
     # Google
     ("gemini.google.com",      "GOOGLE_GEMINI"),
     ("bard.google.com",        "GOOGLE_GEMINI"),
@@ -86,21 +99,18 @@ _WINDOW_KEYWORDS: list[tuple[str, str]] = [
     ("phind.com",              "OTHER_AI"),
     ("phind",                  "OTHER_AI"),
     ("qwen",                   "OTHER_AI"),
-    ("poe.com",                "POE"),
 ]
 
-# Native desktop AI app process-name substrings → AiPlatform enum value
 _PROCESS_KEYWORDS: list[tuple[str, str]] = [
-    ("chatgpt",   "OPENAI_CHATGPT"),
-    ("claude",    "ANTHROPIC_CLAUDE"),
-    ("gemini",    "GOOGLE_GEMINI"),
-    ("copilot",   "MICROSOFT_COPILOT"),
-    ("perplexity","PERPLEXITY"),
-    ("deepseek",  "DEEPSEEK"),
-    ("mistral",   "MISTRAL"),
-    ("grok",      "GROK"),
+    ("chatgpt",    "OPENAI_CHATGPT"),
+    ("claude",     "ANTHROPIC_CLAUDE"),
+    ("gemini",     "GOOGLE_GEMINI"),
+    ("copilot",    "MICROSOFT_COPILOT"),
+    ("perplexity", "PERPLEXITY"),
+    ("deepseek",   "DEEPSEEK"),
+    ("mistral",    "MISTRAL"),
+    ("grok",       "GROK"),
 ]
-
 
 # ── Windows API helpers ───────────────────────────────────────────────────────
 
@@ -112,7 +122,6 @@ _WNDENUMPROC = ctypes.WINFUNCTYPE(
 
 
 def _enum_all_window_titles() -> list[str]:
-    """Return titles of all currently visible windows."""
     titles: list[str] = []
 
     def _cb(hwnd, _lparam):
@@ -139,7 +148,6 @@ def _enum_all_window_titles() -> list[str]:
 
 
 def _get_foreground_title() -> str:
-    """Foreground window title (quick check first)."""
     try:
         user32 = ctypes.windll.user32
         hwnd   = user32.GetForegroundWindow()
@@ -153,8 +161,6 @@ def _get_foreground_title() -> str:
         return ""
 
 
-# ── Detection logic ───────────────────────────────────────────────────────────
-
 def _detect_platform_in_text(text: str) -> str | None:
     lower = text.lower()
     for keyword, plat in _WINDOW_KEYWORDS:
@@ -163,8 +169,7 @@ def _detect_platform_in_text(text: str) -> str | None:
     return None
 
 
-def _scan_processes() -> tuple[str | None, str]:
-    """Scan process names for known native AI desktop apps."""
+def _scan_processes_raw() -> tuple[str | None, str]:
     try:
         for proc in psutil.process_iter(["name"]):
             try:
@@ -179,107 +184,173 @@ def _scan_processes() -> tuple[str | None, str]:
     return None, ""
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── AiBlocker — shared between ai_domain_monitor loop and clipboard_watcher ──
+
+class AiBlocker:
+    """
+    Thread-safe detection + clipboard-clear engine.
+
+    check_and_block() can be called from any thread:
+      - clipboard_watcher calls it immediately on sensitive-content detection
+        (IMMEDIATE path: detection-to-block in <500 ms)
+      - ai_domain_monitor loop calls it every 1 s when clipboard is still flagged
+        (DELAYED path: catches the "copy first, open AI window later" case)
+    """
+
+    def __init__(self, client: DLPApiClient, agent_id: str) -> None:
+        self._client   = client
+        self._agent_id = agent_id
+        self._lock     = threading.Lock()
+
+        # Cooldown state
+        self._last_clip_clear: float         = 0.0
+        self._last_alerted: dict[str, float] = {}
+
+        # Process scan cache shared between the two threads
+        self._proc_cache: tuple[str | None, str] = (None, "")
+        self._proc_cache_time: float              = 0.0
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _detect_platform(self) -> tuple[str | None, str]:
+        """Detect active AI platform. Window scan ~1 ms; process scan cached 2 s."""
+        # Window titles (fast, thread-safe ctypes calls)
+        for title in _enum_all_window_titles():
+            plat = _detect_platform_in_text(title)
+            if plat:
+                return plat, f"window='{title[:80]}'"
+
+        # Process scan (slower; cache for _PROC_CACHE_TTL seconds)
+        now = time.monotonic()
+        with self._lock:
+            if now - self._proc_cache_time > _PROC_CACHE_TTL:
+                self._proc_cache      = _scan_processes_raw()
+                self._proc_cache_time = now
+            cached = self._proc_cache
+
+        plat, name = cached
+        if plat:
+            return plat, f"process={name}"
+        return None, ""
+
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    def check_and_block(
+        self,
+        t_detect: float,
+        content_sample: str = "",
+        risk_score: float   = 0.95,
+        source_tag: str     = "CLIPBOARD",
+    ) -> bool:
+        """
+        Detect active AI platform and block the clipboard if one is found.
+
+        Args:
+            t_detect:       time.monotonic() at the moment sensitive content
+                            was first detected (used for timing log).
+            content_sample: brief sanitised snippet for the backend report.
+            risk_score:     forwarded to the leak-attempt report.
+            source_tag:     "CLIPBOARD" (immediate) or "CLIPBOARD_DELAYED".
+
+        Returns:
+            True  — AI platform found; clipboard clear attempted.
+            False — No AI platform active right now.
+        """
+        detected_plat, detected_source = self._detect_platform()
+        if not detected_plat:
+            return False
+
+        now = time.monotonic()
+
+        # ── STEP 1: clear clipboard (5 s cooldown) ────────────────────────────
+        with self._lock:
+            since_clear = now - self._last_clip_clear
+            do_clear    = since_clear >= _CLIP_CLEAR_COOLDOWN
+            if do_clear:
+                self._last_clip_clear = now
+
+        if do_clear:
+            try:
+                pyperclip.copy("[BLOCKED BY DLP - Sensitive content detected]")
+                block_ms = (time.monotonic() - t_detect) * 1000
+                logger.success(
+                    f"[SPEED] Detection-to-block ({source_tag}): {block_ms:.0f} ms | "
+                    f"platform={detected_plat}"
+                )
+                logger.success(
+                    f"[AI-MONITOR] *** CLIPBOARD CLEARED ***  "
+                    f"platform={detected_plat}  Paste is now BLOCKED"
+                )
+            except Exception as exc:
+                logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
+
+        # ── STEP 2: report to backend (60 s per-platform cooldown) ────────────
+        with self._lock:
+            since_alert = now - self._last_alerted.get(detected_plat, 0.0)
+            do_alert    = since_alert >= _ALERT_COOLDOWN
+            if do_alert:
+                self._last_alerted[detected_plat] = now
+
+        if do_alert:
+            logger.critical(
+                f"[AI-MONITOR] !! DATA LEAK BLOCKED -- {detected_plat} "
+                f"| {detected_source} | via={source_tag}"
+            )
+            attempt = self._client.report_ai_leak_attempt(
+                agent_id=self._agent_id,
+                platform=detected_plat,
+                method="BROWSER",
+                content_sample=(content_sample or detected_source)[:100],
+                risk_score=risk_score,
+                blocked=True,
+            )
+            if attempt:
+                logger.success(
+                    f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
+                    "status=BLOCKED"
+                )
+            else:
+                logger.error("[AI-MONITOR] Failed to report incident to backend")
+
+        return True
+
+
+# ── Background poll loop (handles the DELAYED case) ──────────────────────────
 
 def _ai_monitor_loop(
-    client: DLPApiClient,
     agent_id: str,
     state: AgentState,
     stop: threading.Event,
+    blocker: AiBlocker,
 ) -> None:
-    last_alerted: dict[str, float] = {}   # platform -> monotonic time of last API report
-    last_clip_clear: float = 0.0          # monotonic time of last clipboard clear
     poll_num = 0
 
     while not stop.is_set():
         poll_num += 1
         t0 = time.monotonic()
 
-        # --- A) foreground window (fast) ---
-        fg_title = _get_foreground_title()
-
-        # --- B) ALL windows via EnumWindows ---
-        all_titles = _enum_all_window_titles()
-
-        # --- C) Process scan ---
-        proc_plat, proc_name = _scan_processes()
-
-        # Always log foreground title so we can see what's being read
-        logger.info(
-            f"[AI-MONITOR] Poll #{poll_num} | "
-            f"fg='{fg_title[:70]}' | "
-            f"windows={len(all_titles)} | "
-            f"proc_match={proc_plat or 'none'}"
-        )
-
-        # --- Detection: window titles first, then process names ---
-        detected_plat: str | None = None
-        detected_source: str = ""
-
-        for title in all_titles:
-            plat = _detect_platform_in_text(title)
-            if plat:
-                detected_plat = plat
-                detected_source = f"window='{title[:80]}'"
-                break
-
-        if detected_plat is None and proc_plat:
-            detected_plat = proc_plat
-            detected_source = f"process={proc_name}"
-
-        # --- React to detection ---
-        if detected_plat:
-            now = time.monotonic()
-            clip_recent = state.clipboard_flagged_recently(within_seconds=30.0)
-
-            logger.info(
-                f"[AI-MONITOR] AI platform ACTIVE: {detected_plat} | "
-                f"source={detected_source} | "
-                f"sensitive_clipboard={clip_recent}"
+        # Periodic status log (every 10 s)
+        if poll_num % _LOG_STATUS_EVERY == 0:
+            fg = _get_foreground_title()
+            logger.debug(
+                f"[AI-MONITOR] Status | poll=#{poll_num} | fg='{fg[:70]}'"
             )
 
-            if clip_recent:
-                # ── STEP 1: Clear clipboard immediately (5 s cooldown) ────────
-                since_last_clear = now - last_clip_clear
-                if since_last_clear >= _CLIP_CLEAR_COOLDOWN:
-                    last_clip_clear = now
-                    try:
-                        pyperclip.copy("[BLOCKED BY DLP - Sensitive content detected]")
-                        logger.success(
-                            "[AI-MONITOR] *** CLIPBOARD CLEARED ***  "
-                            f"platform={detected_plat}  "
-                            "Paste is now BLOCKED"
-                        )
-                    except Exception as exc:
-                        logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
+        # Only do expensive detection if clipboard was recently flagged
+        if state.clipboard_flagged_recently(within_seconds=30.0):
+            t_flagged = state.sensitive_clip_monotonic()
+            blocked = blocker.check_and_block(
+                t_detect=t_flagged,
+                source_tag="CLIPBOARD_DELAYED",
+            )
+            if blocked:
+                logger.info(
+                    f"[AI-MONITOR] Delayed block applied "
+                    f"({(time.monotonic() - t_flagged)*1000:.0f} ms after copy)"
+                )
 
-                # ── STEP 2: Report incident to backend (60 s cooldown) ────────
-                since_last_alert = now - last_alerted.get(detected_plat, 0.0)
-                if since_last_alert > _ALERT_COOLDOWN:
-                    last_alerted[detected_plat] = now
-                    logger.critical(
-                        f"[AI-MONITOR] !! DATA LEAK BLOCKED -- {detected_plat} "
-                        f"| clipboard cleared | {detected_source}"
-                    )
-                    attempt = client.report_ai_leak_attempt(
-                        agent_id=agent_id,
-                        platform=detected_plat,
-                        method="BROWSER",
-                        content_sample=detected_source[:100],
-                        risk_score=0.95,
-                        blocked=True,
-                    )
-                    if attempt:
-                        logger.success(
-                            f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
-                            "status=BLOCKED"
-                        )
-                    else:
-                        logger.error("[AI-MONITOR] Failed to report incident to backend")
-
-        elapsed = time.monotonic() - t0
-        remaining = max(0.0, _POLL_INTERVAL - elapsed)
-        stop.wait(remaining)
+        elapsed   = time.monotonic() - t0
+        stop.wait(max(0.0, _POLL_INTERVAL - elapsed))
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -289,17 +360,26 @@ def start_ai_domain_monitor(
     agent_id: str,
     state: AgentState,
     stop: threading.Event,
-) -> threading.Thread:
+) -> tuple[threading.Thread, "AiBlocker"]:
+    """
+    Start the AI domain monitor background thread.
+
+    Returns (thread, blocker) — pass *blocker* to start_clipboard_watcher()
+    so the clipboard thread can call check_and_block() immediately on detection.
+    """
     if sys.platform != "win32":
-        logger.warning("[AI-MONITOR] Non-Windows platform -- AI domain monitor disabled")
-        return threading.Thread(target=lambda: None, daemon=True)
+        logger.warning("[AI-MONITOR] Non-Windows -- AI domain monitor disabled")
+        dummy_blocker = AiBlocker(client, agent_id)
+        return threading.Thread(target=lambda: None, daemon=True), dummy_blocker
+
+    blocker = AiBlocker(client, agent_id)
 
     t = threading.Thread(
         target=_ai_monitor_loop,
-        args=(client, agent_id, state, stop),
+        args=(agent_id, state, stop, blocker),
         daemon=True,
         name="ai-domain-monitor",
     )
     t.start()
-    logger.info("AI domain monitor started  (EnumWindows scan every 10s)")
-    return t
+    logger.info("AI domain monitor started  (1 s poll | shared AiBlocker)")
+    return t, blocker

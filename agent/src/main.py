@@ -20,6 +20,8 @@ from file_watcher       import start_watcher
 from clipboard_watcher  import start_clipboard_watcher
 from ai_domain_monitor  import start_ai_domain_monitor
 from ueba_collector     import start_ueba_collector
+from screenshot_monitor import start_screenshot_monitor
+from app_launch_monitor import start_app_launch_monitor
 
 _STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -28,6 +30,7 @@ _BANNER = """
 |   DLP Agent v1.0  --  Data Loss Prevention       |
 |   Platform: Simulated Endpoint Agent             |
 |   Modules : File / Clipboard / AI-Domain / UEBA  |
+|             Screenshot / App-Launch              |
 +--------------------------------------------------+"""
 
 
@@ -76,17 +79,27 @@ def main() -> None:
 
     backend_url        = os.getenv("BACKEND_URL",        "http://localhost:3001")
     classifier_url     = os.getenv("CLASSIFIER_URL",     "http://localhost:8000")
-    watch_dir          = os.getenv("WATCH_DIR",          str(Path.home() / "dlp-watch"))
     heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+
+    # Support WATCH_DIRS (comma-separated) with fallback to legacy WATCH_DIR
+    _raw = (
+        os.getenv("WATCH_DIRS")
+        or os.getenv("WATCH_DIR")
+        or str(Path.home() / "dlp-watch")
+    )
+    watch_dirs: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 
     logger.info(f"Backend    : {backend_url}")
     logger.info(f"Classifier : {classifier_url}")
     logger.info(f"Heartbeat  : every {heartbeat_interval}s")
 
-    # Ensure watch folder exists
-    watch_path = Path(watch_dir)
-    watch_path.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Watch dir  : {watch_path}")
+    # Ensure every watch folder exists
+    watch_paths: list[Path] = []
+    for raw_dir in watch_dirs:
+        p = Path(raw_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        watch_paths.append(p)
+        logger.info(f"Watch dir  : {p}")
 
     # Load saved agent state
     saved = _load_state()
@@ -119,25 +132,36 @@ def main() -> None:
             daemon=True,
             name="heartbeat",
         ).start()
-        logger.info("[1/4] Heartbeat thread started")
+        logger.info("[1/7] Heartbeat thread started")
 
     # ── 2. File watcher ───────────────────────────────────────────────────────
-    observer = start_watcher(str(watch_path), client, agent_id or "", shared)
-    logger.info("[2/4] File watcher started")
+    observer = start_watcher([str(p) for p in watch_paths], client, agent_id or "", shared)
+    logger.info("[2/7] File watcher started")
 
-    # ── 3. Clipboard watcher ──────────────────────────────────────────────────
-    start_clipboard_watcher(client, agent_id or "", shared, stop)
-    logger.info("[3/4] Clipboard watcher started")
+    # ── 4. AI domain monitor (creates AiBlocker shared with clipboard watcher) ──
+    _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop)
+    logger.info("[4/7] AI domain monitor started")
 
-    # ── 4. AI domain monitor ──────────────────────────────────────────────────
-    start_ai_domain_monitor(client, agent_id or "", shared, stop)
-    logger.info("[4/4] AI domain monitor started")
+    # ── 3. Clipboard watcher (receives blocker for immediate check-and-block) ──
+    start_clipboard_watcher(client, agent_id or "", shared, stop, blocker)
+    logger.info("[3/7] Clipboard watcher started")
 
     # ── 5. UEBA collector (background flush) ─────────────────────────────────
     start_ueba_collector(client, agent_id or "", shared, stop)
-    logger.info("[+]   UEBA collector started")
+    logger.info("[5/7] UEBA collector started")
 
-    logger.success(f"DLP Agent fully operational -- watching '{watch_path}'")
+    # ── 6. Screenshot monitor ─────────────────────────────────────────────────
+    start_screenshot_monitor(client, agent_id or "", stop)
+    logger.info("[6/7] Screenshot monitor started")
+
+    # ── 7. App launch monitor ─────────────────────────────────────────────────
+    start_app_launch_monitor(client, agent_id or "", stop)
+    logger.info("[7/7] App launch monitor started")
+
+    logger.success(
+        f"DLP Agent fully operational -- "
+        f"watching {len(watch_paths)} folder(s) | 7 monitors active"
+    )
     logger.info("Press Ctrl+C to stop\n")
 
     try:
