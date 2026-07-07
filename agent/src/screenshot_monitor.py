@@ -1,13 +1,24 @@
 """
-Screenshot monitor: hooks Print Screen and Win+Shift+S globally.
+Screenshot monitor: detects a screenshot via a clipboard-image poll, with a
+best-effort keyboard hook for Print Screen / Win+Shift+S as a fallback.
 
-BLOCKING STRATEGY — the clipboard clear happens INSIDE the keyboard hook
-callback (runs in keyboard's own hook thread) so it fires within ~2 ms of the
-keypress, before the user can switch windows and paste.  Async work (UEBA
-event, incident creation) is queued to the main monitor loop.
+The keyboard hook is NOT reliable on Windows 10/11: PrtScn and Win+Shift+S are
+handled by the Shell's Snip & Sketch subsystem before they reach a normal
+SetWindowsHookEx-based global hook, regardless of process privilege --
+confirmed by testing with admin rights, which made no difference. Rather than
+depend on intercepting the keypress, the primary mechanism polls the clipboard
+(same technique as clipboard_watcher.py) and reacts the moment an image shows
+up there, which is true regardless of how the screenshot was triggered.
+
+BLOCKING STRATEGY — the clipboard clear happens inline in the poll loop (or,
+if the keyboard hook does happen to fire in some environment, in its own hook
+thread) so it lands as fast as the detection mechanism allows, before the
+user can switch windows and paste. Async work (UEBA event, incident
+creation) is queued to the main monitor loop.
 """
 
 import os
+import shutil
 import sys
 import queue
 import threading
@@ -22,19 +33,59 @@ from api_client import DLPApiClient
 
 _POLICY_ID      = "seed-policy-pii-001"
 _COOLDOWN_SECS  = 5.0    # min seconds between reactions (debounce rapid presses)
-_CHECK_INTERVAL = 0.5    # seconds between event-queue drains
+_CHECK_INTERVAL = 0.2    # seconds between clipboard-image polls / queue drains
+_OCR_MAX_CLASSIFY = 5_000  # max chars of OCR'd text sent to the classifier
+
+_CF_BITMAP = 2   # CF_BITMAP
+_CF_DIB    = 8   # CF_DIB
 
 _DLP_BLOCK_MSG  = "[BLOCKED BY DLP - Screenshot cleared]"
 
-# Window title substrings that classify a screenshot as sensitive
+# ── OCR setup ──────────────────────────────────────────────────────────────
+# The title-keyword check below is a heuristic that only catches sensitive
+# content when the WINDOW happens to be named suggestively -- a file called
+# "test.txt" full of card numbers won't match any keyword. OCR reads what's
+# actually in the captured image and runs it through the same classifier
+# every other monitor uses, so screenshot detection is judged the same way
+# as file/clipboard/file-picker content instead of guessing from a title.
+try:
+    import pytesseract
+    from PIL import ImageGrab
+
+    _tesseract_path = shutil.which("tesseract") or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.isfile(_tesseract_path):
+        pytesseract.pytesseract.tesseract_cmd = _tesseract_path
+        _OCR_AVAILABLE = True
+    else:
+        logger.warning(
+            "[SCREENSHOT] Tesseract-OCR not found -- content-based screenshot "
+            "detection disabled, falling back to title-keyword heuristic only"
+        )
+        _OCR_AVAILABLE = False
+except ImportError:
+    logger.warning(
+        "[SCREENSHOT] pytesseract/Pillow not installed -- content-based "
+        "screenshot detection disabled, falling back to title-keyword heuristic only"
+    )
+    _OCR_AVAILABLE = False
+
+# Window title substrings that classify a screenshot as sensitive. This is a
+# heuristic on the title text, not real content classification -- a
+# screenshot has no extractable text the way a file/clipboard payload does,
+# so there's no classifier engine call here. Widen this list as needed.
 _SENSITIVE_KEYWORDS = frozenset({
-    "confidential", "client", "salary", "payroll",
+    "confidential", "client", "customer", "salary", "payroll",
     "ssn", "iban", "carte", "bancaire",
     "password", "secret", "dlp",
+    "invoice", "contract", "budget",
+    "personal", "private", "restricted", "internal",
+    "bank", "account", "tax", "medical",
 })
 
 # Office file title format: "report_client.xlsx - Microsoft Excel"
-_SENSITIVE_FILENAME_KW = frozenset({"client", "confidential"})
+_SENSITIVE_FILENAME_KW = frozenset({
+    "client", "customer", "confidential", "invoice", "contract", "budget", "report",
+})
 _OFFICE_EXTS = frozenset({".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt", ".pdf"})
 
 
@@ -68,6 +119,81 @@ def _is_sensitive(title: str) -> bool:
     return False
 
 
+def _clipboard_seq() -> int:
+    """Monotonically increasing counter Windows bumps on every clipboard
+    write, from any process -- cheap way to detect "something changed"
+    without doing per-format content comparisons. Doesn't require an open
+    clipboard handle."""
+    try:
+        return ctypes.windll.user32.GetClipboardSequenceNumber()
+    except Exception:
+        return -1
+
+
+def _clipboard_has_image() -> bool:
+    """True if the clipboard currently holds a bitmap. Also doesn't require
+    an open handle, so it's safe to call right before pyperclip.copy()."""
+    try:
+        user32 = ctypes.windll.user32
+        return bool(
+            user32.IsClipboardFormatAvailable(_CF_BITMAP)
+            or user32.IsClipboardFormatAvailable(_CF_DIB)
+        )
+    except Exception:
+        return False
+
+
+def _content_check_async(
+    image,
+    title: str,
+    t_detect: float,
+    client: DLPApiClient,
+    event_q: "queue.Queue[tuple]",
+) -> None:
+    """
+    Runs in its own thread (OCR + a network classify call are too slow for
+    the main poll loop). Catches sensitive content the title heuristic
+    missed -- e.g. a boringly-named file. If the fast title-based path
+    already cleared the clipboard, _clipboard_has_image() will be False by
+    the time this finishes and it skips, so the same screenshot never gets
+    reported twice.
+    """
+    try:
+        text = pytesseract.image_to_string(image) or ""
+    except Exception as exc:
+        logger.debug(f"[SCREENSHOT] OCR failed: {exc}")
+        return
+
+    if len(text.strip()) < 5:
+        return
+
+    result = client.classify(text=text[:_OCR_MAX_CLASSIFY])
+    if result is None:
+        logger.warning("[SCREENSHOT] Classifier unavailable -- skipping OCR content check")
+        return
+
+    risk_score = result.get("risk_score", 0.0)
+    if risk_score <= 0.5:
+        logger.debug(f"[SCREENSHOT] OCR content check: clean (risk={risk_score:.2f})")
+        return
+
+    logger.warning(
+        f"[SCREENSHOT] OCR content check found sensitive text the title "
+        f"heuristic missed | risk={risk_score:.2f} | types="
+        f"{[d['type'] for d in result.get('detections', [])]}"
+    )
+
+    cleared = False
+    if _clipboard_has_image():
+        try:
+            pyperclip.copy(_DLP_BLOCK_MSG)
+            cleared = True
+        except Exception:
+            pass
+
+    event_q.put_nowait((True, "OCR_CONTENT", title, t_detect, cleared))
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def _screenshot_loop(
@@ -76,84 +202,111 @@ def _screenshot_loop(
     user_id: str,
     stop: threading.Event,
 ) -> None:
-    try:
-        import keyboard as _kb
-    except ImportError:
-        logger.error(
-            "[SCREENSHOT] 'keyboard' library not installed -- "
-            "run: pip install keyboard"
-        )
-        return
-
-    # Queue carries: (sensitive: bool, key_name: str, title: str,
+    # Queue carries: (sensitive: bool, source_tag: str, title: str,
     #                 t_event: float, cleared: bool)
     event_q: queue.Queue[tuple] = queue.Queue()
 
-    # Shared cooldown state accessed from keyboard hook thread + main loop thread
+    # Shared cooldown state -- accessed from the poll loop (main thread) and,
+    # if it happens to fire, the keyboard hook's own thread.
     _last_action = [0.0]     # mutable single-element list for nonlocal mutation
     _cb_lock     = threading.Lock()
 
-    def _make_hook(key_name: str):
+    def _handle_detection(source_tag: str) -> None:
         """
-        Returns a hotkey callback that:
-          1. Enforces cooldown (in the hook thread — fast path)
-          2. Reads the foreground window title (~1 ms)
-          3. If sensitive: immediately clears the clipboard (~1 ms) — this is the
-             actual block; happens before the user can switch and paste
+        Shared by both detection paths:
+          1. Enforces cooldown
+          2. Reads the foreground window title
+          3. If sensitive: immediately clears the clipboard -- this is the
+             actual block
           4. Pushes event tuple to queue for async reporting in the main loop
         """
-        def _cb():
-            now = time.monotonic()
-            with _cb_lock:
-                if now - _last_action[0] < _COOLDOWN_SECS:
-                    return
-                _last_action[0] = now
+        now = time.monotonic()
+        with _cb_lock:
+            if now - _last_action[0] < _COOLDOWN_SECS:
+                return
+            _last_action[0] = now
 
-            title     = _get_foreground_title()
-            sensitive = _is_sensitive(title)
-            cleared   = False
+        title     = _get_foreground_title()
+        sensitive = _is_sensitive(title)
+        cleared   = False
 
-            if sensitive:
-                try:
-                    pyperclip.copy(_DLP_BLOCK_MSG)
-                    cleared = True
-                except Exception:
-                    pass
+        if sensitive:
+            try:
+                pyperclip.copy(_DLP_BLOCK_MSG)
+                cleared = True
+            except Exception:
+                pass
 
-            event_q.put_nowait((sensitive, key_name, title, now, cleared))
+        event_q.put_nowait((sensitive, source_tag, title, now, cleared))
 
-        return _cb
-
-    # Register hotkeys
+    # Best-effort keyboard hook -- kept as a fast path in case it does fire in
+    # some environment/Windows configuration; see module docstring for why it
+    # can't be relied on for PrtScn/Win+Shift+S specifically.
+    _kb = None
     hotkeys_ok = 0
-    for key_combo, name in [
-        ("print screen",    "PRINT_SCREEN"),
-        ("windows+shift+s", "WIN_SHIFT_S"),
-    ]:
-        try:
-            _kb.add_hotkey(key_combo, _make_hook(name))
-            hotkeys_ok += 1
-            logger.info(f"[SCREENSHOT] Hotkey registered: {key_combo}")
-        except Exception as exc:
-            logger.warning(f"[SCREENSHOT] Could not register '{key_combo}': {exc}")
+    try:
+        import keyboard as _kb
+        for key_combo, name in [
+            ("print screen",    "PRINT_SCREEN"),
+            ("windows+shift+s", "WIN_SHIFT_S"),
+        ]:
+            try:
+                _kb.add_hotkey(key_combo, lambda name=name: _handle_detection(name))
+                hotkeys_ok += 1
+                logger.info(f"[SCREENSHOT] Hotkey registered: {key_combo}")
+            except Exception as exc:
+                logger.warning(f"[SCREENSHOT] Could not register '{key_combo}': {exc}")
+    except ImportError:
+        logger.warning(
+            "[SCREENSHOT] 'keyboard' library not installed -- "
+            "hook fallback disabled, clipboard-image poll still active"
+        )
 
-    if hotkeys_ok == 0:
-        logger.error("[SCREENSHOT] No hotkeys registered -- monitor disabled")
-        return
+    logger.info(
+        f"[SCREENSHOT] Loop started -- clipboard-image poll every {_CHECK_INTERVAL}s "
+        f"(primary detection), {hotkeys_ok} keyboard hook(s) as best-effort fallback"
+    )
 
-    logger.info("[SCREENSHOT] Loop started -- waiting for screenshot keys")
+    last_seq = _clipboard_seq()
 
     while not stop.is_set():
+        # ── Primary: clipboard-image poll ────────────────────────────────────
+        seq = _clipboard_seq()
+        if seq != last_seq:
+            last_seq = seq
+            if _clipboard_has_image():
+                _handle_detection("CLIPBOARD_IMAGE")
+
+                # Thorough path: OCR the actual image content in the
+                # background in case the title heuristic just missed it.
+                # Grab the image on THIS thread immediately (clipboard
+                # content can change again before a background thread gets
+                # scheduled), hand the pixels off, and let the classify
+                # round-trip happen off the poll loop.
+                if _OCR_AVAILABLE:
+                    try:
+                        image = ImageGrab.grabclipboard()
+                    except Exception as exc:
+                        image = None
+                        logger.debug(f"[SCREENSHOT] Could not grab clipboard image: {exc}")
+                    if image is not None and not isinstance(image, list):
+                        threading.Thread(
+                            target=_content_check_async,
+                            args=(image, _get_foreground_title(), time.monotonic(), client, event_q),
+                            daemon=True,
+                            name="screenshot-ocr",
+                        ).start()
+
         # Drain queued events (async reporting; the blocking already happened)
         while True:
             try:
-                sensitive, key_name, title, t_event, cleared = event_q.get_nowait()
+                sensitive, source_tag, title, t_event, cleared = event_q.get_nowait()
             except queue.Empty:
                 break
 
             if not sensitive:
                 logger.info(
-                    f"[SCREENSHOT] {key_name} -- harmless screenshot, no action "
+                    f"[SCREENSHOT] {source_tag} -- harmless screenshot, no action "
                     f"(window='{title[:70]}')"
                 )
                 continue
@@ -179,7 +332,7 @@ def _screenshot_loop(
                 event_type="SCREENSHOT",
                 metadata={
                     "window_title": title[:255],
-                    "key":          key_name,
+                    "key":          source_tag,
                     "blocked":      cleared,
                     "timestamp":    ts,
                 },
@@ -209,10 +362,11 @@ def _screenshot_loop(
 
         stop.wait(_CHECK_INTERVAL)
 
-    try:
-        _kb.unhook_all()
-    except Exception:
-        pass
+    if _kb is not None:
+        try:
+            _kb.unhook_all()
+        except Exception:
+            pass
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -243,6 +397,6 @@ def start_screenshot_monitor(
     t.start()
     logger.info(
         "Screenshot monitor started  "
-        "(Print Screen + Win+Shift+S, clipboard cleared in hook callback)"
+        "(clipboard-image poll, PrtScn/Win+Shift+S hook as fallback)"
     )
     return t

@@ -22,6 +22,7 @@ from ai_domain_monitor  import start_ai_domain_monitor
 from ueba_collector     import start_ueba_collector
 from screenshot_monitor import start_screenshot_monitor
 from app_launch_monitor import start_app_launch_monitor
+from file_dialog_monitor import start_file_dialog_monitor
 
 _STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -30,7 +31,7 @@ _BANNER = """
 |   DLP Agent v1.0  --  Data Loss Prevention       |
 |   Platform: Simulated Endpoint Agent             |
 |   Modules : File / Clipboard / AI-Domain / UEBA  |
-|             Screenshot / App-Launch              |
+|             Screenshot / App-Launch / File-Dialog |
 +--------------------------------------------------+"""
 
 
@@ -132,35 +133,39 @@ def main() -> None:
             daemon=True,
             name="heartbeat",
         ).start()
-        logger.info("[1/7] Heartbeat thread started")
+        logger.info("[1/8] Heartbeat thread started")
 
     # ── 2. File watcher ───────────────────────────────────────────────────────
     observer = start_watcher([str(p) for p in watch_paths], client, agent_id or "", shared)
-    logger.info("[2/7] File watcher started")
+    logger.info("[2/8] File watcher started")
 
     # ── 4. AI domain monitor (creates AiBlocker shared with clipboard watcher) ──
     _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop)
-    logger.info("[4/7] AI domain monitor started")
+    logger.info("[4/8] AI domain monitor started")
 
     # ── 3. Clipboard watcher (receives blocker for immediate check-and-block) ──
     start_clipboard_watcher(client, agent_id or "", shared, stop, blocker)
-    logger.info("[3/7] Clipboard watcher started")
+    logger.info("[3/8] Clipboard watcher started")
 
     # ── 5. UEBA collector (background flush) ─────────────────────────────────
     start_ueba_collector(client, agent_id or "", shared, stop)
-    logger.info("[5/7] UEBA collector started")
+    logger.info("[5/8] UEBA collector started")
 
     # ── 6. Screenshot monitor ─────────────────────────────────────────────────
     start_screenshot_monitor(client, agent_id or "", stop)
-    logger.info("[6/7] Screenshot monitor started")
+    logger.info("[6/8] Screenshot monitor started")
 
     # ── 7. App launch monitor ─────────────────────────────────────────────────
     start_app_launch_monitor(client, agent_id or "", stop)
-    logger.info("[7/7] App launch monitor started")
+    logger.info("[7/8] App launch monitor started")
+
+    # ── 8. File dialog monitor (blocks sensitive file picks in AI tabs) ──────
+    start_file_dialog_monitor(client, agent_id or "", stop)
+    logger.info("[8/8] File dialog monitor started")
 
     logger.success(
         f"DLP Agent fully operational -- "
-        f"watching {len(watch_paths)} folder(s) | 7 monitors active"
+        f"watching {len(watch_paths)} folder(s) | 8 monitors active"
     )
     logger.info("Press Ctrl+C to stop\n")
 

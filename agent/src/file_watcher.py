@@ -164,6 +164,13 @@ class _DLPHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._process(event.src_path)
 
+    def on_moved(self, event):
+        # Most editors (Notepad, VS Code, Word...) save an existing file by
+        # writing a temp file and renaming it over the original, which arrives
+        # here as a move rather than a "modified" event. Scan the destination.
+        if not event.is_directory:
+            self._process(event.dest_path)
+
 
 # ── Public entry point ────────────────────────────────────────────────────────
 

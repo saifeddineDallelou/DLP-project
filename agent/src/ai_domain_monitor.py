@@ -43,6 +43,7 @@ _WINDOW_KEYWORDS: list[tuple[str, str]] = [
     # Anthropic / Claude
     ("claude.ai",              "ANTHROPIC_CLAUDE"),
     ("anthropic",              "ANTHROPIC_CLAUDE"),
+    ("claude",                 "ANTHROPIC_CLAUDE"),
     # Google
     ("gemini.google.com",      "GOOGLE_GEMINI"),
     ("bard.google.com",        "GOOGLE_GEMINI"),

@@ -97,7 +97,9 @@ PATTERNS: List[_Pat] = [
             r")\b"
         ),
         rule="PCI-DSS",
-        weight=0.40,
+        # High enough to cross the 0.5 block threshold alone -- a Luhn-valid
+        # card number needs no second coincidental signal to be actionable.
+        weight=0.55,
         confidence=0.99,
         mask=_mask_card,
         luhn=True,
@@ -112,7 +114,7 @@ PATTERNS: List[_Pat] = [
             r")\b"
         ),
         rule="PCI-DSS",
-        weight=0.30,
+        weight=0.55,  # high-confidence structured match -- see credit_card comment
         confidence=0.95,
         mask=_mask_iban,
     ),
@@ -132,7 +134,7 @@ PATTERNS: List[_Pat] = [
         # Exclude invalid SSNs (000, 666, 9xx area; 00 group; 0000 serial)
         pattern=re.compile(r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
         rule="HIPAA",
-        weight=0.25,
+        weight=0.55,  # high-confidence structured match -- see credit_card comment
         confidence=0.97,
         mask=_mask_ssn,
     ),
@@ -145,7 +147,7 @@ PATTERNS: List[_Pat] = [
             re.IGNORECASE,
         ),
         rule="GDPR",
-        weight=0.25,
+        weight=0.55,  # high-confidence structured match -- see credit_card comment
         confidence=0.92,
         mask=_mask_nin,
     ),
