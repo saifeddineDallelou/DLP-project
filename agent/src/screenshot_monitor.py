@@ -30,8 +30,9 @@ import pyperclip
 from loguru import logger
 
 from api_client import DLPApiClient
+from policy_resolver import PolicyResolver, DEFAULT_POLICY_ID
 
-_POLICY_ID      = "seed-policy-pii-001"
+_POLICY_ID      = DEFAULT_POLICY_ID  # fallback when no PolicyResolver is supplied
 _COOLDOWN_SECS  = 5.0    # min seconds between reactions (debounce rapid presses)
 _CHECK_INTERVAL = 0.2    # seconds between clipboard-image polls / queue drains
 _OCR_MAX_CLASSIFY = 5_000  # max chars of OCR'd text sent to the classifier
@@ -149,6 +150,7 @@ def _content_check_async(
     t_detect: float,
     client: DLPApiClient,
     event_q: "queue.Queue[tuple]",
+    policy_resolver: PolicyResolver | None = None,
 ) -> None:
     """
     Runs in its own thread (OCR + a network classify call are too slow for
@@ -177,21 +179,28 @@ def _content_check_async(
         logger.debug(f"[SCREENSHOT] OCR content check: clean (risk={risk_score:.2f})")
         return
 
+    detections = result.get("detections", [])
     logger.warning(
         f"[SCREENSHOT] OCR content check found sensitive text the title "
         f"heuristic missed | risk={risk_score:.2f} | types="
-        f"{[d['type'] for d in result.get('detections', [])]}"
+        f"{[d['type'] for d in detections]}"
+    )
+
+    policy = (
+        policy_resolver.resolve(detections)
+        if policy_resolver
+        else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
     )
 
     cleared = False
-    if _clipboard_has_image():
+    if policy["action"] not in ("ALLOW", "ALERT") and _clipboard_has_image():
         try:
             pyperclip.copy(_DLP_BLOCK_MSG)
             cleared = True
         except Exception:
             pass
 
-    event_q.put_nowait((True, "OCR_CONTENT", title, t_detect, cleared))
+    event_q.put_nowait((policy, "OCR_CONTENT", title, t_detect, cleared, detections))
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -201,9 +210,11 @@ def _screenshot_loop(
     agent_id: str,
     user_id: str,
     stop: threading.Event,
+    policy_resolver: PolicyResolver | None = None,
 ) -> None:
-    # Queue carries: (sensitive: bool, source_tag: str, title: str,
-    #                 t_event: float, cleared: bool)
+    # Queue carries: (policy: dict|None, source_tag: str, title: str,
+    #                 t_event: float, cleared: bool, detections: list)
+    # policy is None for a harmless screenshot -- otherwise {"id","action","name"}
     event_q: queue.Queue[tuple] = queue.Queue()
 
     # Shared cooldown state -- accessed from the poll loop (main thread) and,
@@ -229,15 +240,25 @@ def _screenshot_loop(
         title     = _get_foreground_title()
         sensitive = _is_sensitive(title)
         cleared   = False
+        policy    = None
 
         if sensitive:
-            try:
-                pyperclip.copy(_DLP_BLOCK_MSG)
-                cleared = True
-            except Exception:
-                pass
+            # No classify() call happens on this path (title-heuristic only),
+            # so there are no compliance-tagged detections to hand the policy
+            # resolver -- it'll fall back to the default policy for these.
+            policy = (
+                policy_resolver.resolve([])
+                if policy_resolver
+                else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
+            )
+            if policy["action"] not in ("ALLOW", "ALERT"):
+                try:
+                    pyperclip.copy(_DLP_BLOCK_MSG)
+                    cleared = True
+                except Exception:
+                    pass
 
-        event_q.put_nowait((sensitive, source_tag, title, now, cleared))
+        event_q.put_nowait((policy, source_tag, title, now, cleared, []))
 
     # Best-effort keyboard hook -- kept as a fast path in case it does fire in
     # some environment/Windows configuration; see module docstring for why it
@@ -292,7 +313,7 @@ def _screenshot_loop(
                     if image is not None and not isinstance(image, list):
                         threading.Thread(
                             target=_content_check_async,
-                            args=(image, _get_foreground_title(), time.monotonic(), client, event_q),
+                            args=(image, _get_foreground_title(), time.monotonic(), client, event_q, policy_resolver),
                             daemon=True,
                             name="screenshot-ocr",
                         ).start()
@@ -300,29 +321,40 @@ def _screenshot_loop(
         # Drain queued events (async reporting; the blocking already happened)
         while True:
             try:
-                sensitive, source_tag, title, t_event, cleared = event_q.get_nowait()
+                policy, source_tag, title, t_event, cleared, detections = event_q.get_nowait()
             except queue.Empty:
                 break
 
-            if not sensitive:
+            if policy is None:
                 logger.info(
                     f"[SCREENSHOT] {source_tag} -- harmless screenshot, no action "
                     f"(window='{title[:70]}')"
                 )
                 continue
 
-            # Sensitive screenshot
+            action = policy["action"]
+            if action == "ALLOW":
+                logger.debug(
+                    f"[SCREENSHOT] Sensitive window captured but policy "
+                    f"'{policy.get('name') or 'default'}' allows it -- no report (window='{title[:70]}')"
+                )
+                continue
+
+            # Sensitive screenshot, policy says ALERT / BLOCK / QUARANTINE
             logger.critical(
                 f"[SCREENSHOT] !! Sensitive window captured: '{title}'"
             )
-            if cleared:
-                logger.success(
-                    "[SCREENSHOT] Image cleared from clipboard - capture blocked"
-                )
+            if action in ("BLOCK", "QUARANTINE"):
+                if cleared:
+                    logger.success(
+                        "[SCREENSHOT] Image cleared from clipboard - capture blocked"
+                    )
+                else:
+                    logger.warning(
+                        "[SCREENSHOT] Could not clear clipboard -- block may have failed"
+                    )
             else:
-                logger.warning(
-                    "[SCREENSHOT] Could not clear clipboard -- block may have failed"
-                )
+                logger.warning("[SCREENSHOT] Policy set to ALERT -- reporting without blocking")
 
             ts = datetime.now().isoformat()
 
@@ -346,7 +378,7 @@ def _screenshot_loop(
 
             incident = client.create_incident(
                 agent_id=agent_id,
-                policy_id=_POLICY_ID,
+                policy_id=policy["id"],
                 severity="HIGH",
                 channel="SCREENSHOT",
                 evidence=title[:255],
@@ -375,6 +407,7 @@ def start_screenshot_monitor(
     client: DLPApiClient,
     agent_id: str,
     stop: threading.Event,
+    policy_resolver: PolicyResolver | None = None,
 ) -> threading.Thread:
     if sys.platform != "win32":
         logger.warning(
@@ -390,7 +423,7 @@ def start_screenshot_monitor(
 
     t = threading.Thread(
         target=_screenshot_loop,
-        args=(client, agent_id, user_id, stop),
+        args=(client, agent_id, user_id, stop, policy_resolver),
         daemon=True,
         name="screenshot-monitor",
     )

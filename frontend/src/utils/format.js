@@ -1,3 +1,10 @@
+import { File, Clipboard, Usb, Printer, Camera, Network } from 'lucide-react';
+
+export const CHANNEL_ICON = {
+  FILE: File, CLIPBOARD: Clipboard, USB: Usb,
+  PRINT: Printer, SCREENSHOT: Camera, NETWORK: Network,
+};
+
 export function formatDate(dateStr) {
   if (!dateStr) return '—';
   return new Date(dateStr).toLocaleString('en-US', {
@@ -22,27 +29,94 @@ export function truncate(str, n = 8) {
   return str.length > n ? str.slice(0, n) + '…' : str;
 }
 
-export const SEVERITY_STYLES = {
-  LOW:      'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-  MEDIUM:   'bg-amber-500/10   text-amber-400   border-amber-500/20',
-  HIGH:     'bg-orange-500/10  text-orange-400  border-orange-500/20',
-  CRITICAL: 'bg-red-500/10     text-red-400     border-red-500/20',
+export function titleCase(str) {
+  if (!str) return '';
+  return str.toLowerCase().replace(/(^|_|\s)(\w)/g, (_, sep, c) => (sep === '_' ? ' ' : sep) + c.toUpperCase());
+}
+
+// ── Tone maps ──────────────────────────────────────────────────────────────
+// Every badge/pill in the app reads from one of these instead of inlining
+// Tailwind color classes per-page. Keys are the exact backend enum values.
+
+export const SEVERITY_TONES = {
+  LOW:      { bg: 'bg-severity-low-soft',      text: 'text-severity-low-text',      dot: 'bg-severity-low'      },
+  MEDIUM:   { bg: 'bg-severity-medium-soft',   text: 'text-severity-medium-text',   dot: 'bg-severity-medium'   },
+  HIGH:     { bg: 'bg-severity-high-soft',     text: 'text-severity-high-text',     dot: 'bg-severity-high'     },
+  CRITICAL: { bg: 'bg-severity-critical-soft', text: 'text-severity-critical-text', dot: 'bg-severity-critical' },
 };
 
-export const SEVERITY_DOT = {
-  LOW:      'bg-emerald-400',
-  MEDIUM:   'bg-amber-400',
-  HIGH:     'bg-orange-400',
-  CRITICAL: 'bg-red-400',
+export const STATUS_TONES = {
+  OPEN:           { bg: 'bg-accent-soft',              text: 'text-accent-text',            dot: 'bg-accent'              },
+  IN_PROGRESS:    { bg: 'bg-severity-medium-soft',     text: 'text-severity-medium-text',   dot: 'bg-severity-medium'     },
+  RESOLVED:       { bg: 'bg-severity-low-soft',        text: 'text-severity-low-text',      dot: 'bg-severity-low'        },
+  FALSE_POSITIVE: { bg: 'bg-white/5',                  text: 'text-ink-faint',              dot: 'bg-ink-faint'           },
 };
 
-export const STATUS_STYLES = {
-  OPEN:           'bg-sky-500/10     text-sky-400     border-sky-500/20',
-  IN_PROGRESS:    'bg-violet-500/10  text-violet-400  border-violet-500/20',
-  RESOLVED:       'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-  FALSE_POSITIVE: 'bg-slate-500/10   text-slate-400   border-slate-500/20',
+export const ACTION_TONES = {
+  ALLOW:      { bg: 'bg-severity-low-soft',      text: 'text-severity-low-text'      },
+  ALERT:      { bg: 'bg-severity-medium-soft',   text: 'text-severity-medium-text'   },
+  BLOCK:      { bg: 'bg-severity-critical-soft', text: 'text-severity-critical-text' },
+  QUARANTINE: { bg: 'bg-accent-soft',            text: 'text-accent-text'            },
 };
 
-export const SEVERITY_CHART_COLORS = {
-  LOW: '#34d399', MEDIUM: '#fbbf24', HIGH: '#fb923c', CRITICAL: '#f87171',
+export const AGENT_STATUS_TONES = {
+  ACTIVE:   { bg: 'bg-severity-low-soft',    text: 'text-severity-low-text'    },
+  INACTIVE: { bg: 'bg-white/5',              text: 'text-ink-faint'            },
+  ERROR:    { bg: 'bg-severity-critical-soft', text: 'text-severity-critical-text' },
+};
+
+export const BLOCKED_TONES = {
+  true:  { bg: 'bg-severity-critical-soft', text: 'text-severity-critical-text' },
+  false: { bg: 'bg-severity-medium-soft',   text: 'text-severity-medium-text'   },
+};
+
+export const RISK_LEVEL_TONES = {
+  LOW:    { text: 'text-severity-low-text',    bar: 'bg-severity-low'    },
+  MEDIUM: { text: 'text-severity-medium-text', bar: 'bg-severity-medium' },
+  HIGH:   { text: 'text-severity-high-text',   bar: 'bg-severity-high'   },
+};
+
+export function riskLevelFor(score) {
+  const pct = (score ?? 0) * 100;
+  if (pct >= 70) return 'HIGH';
+  if (pct >= 40) return 'MEDIUM';
+  return 'LOW';
+}
+
+export const COMPLIANCE_RULES = ['PCI-DSS', 'HIPAA', 'GDPR', 'INTERNAL'];
+
+export const COMPLIANCE_RULE_LABELS = {
+  'PCI-DSS': 'PCI-DSS · Payment cards',
+  HIPAA:     'HIPAA · Health information',
+  GDPR:      'GDPR · Personal data',
+  INTERNAL:  'Internal · Credentials & secrets',
+};
+
+export const EVENT_TYPE_LABELS = {
+  FILE_ACCESS:        'File access',
+  USB_INSERT:         'USB insert',
+  CLIPBOARD_COPY:     'Clipboard copy',
+  SCREENSHOT:         'Screenshot',
+  APP_LAUNCH:         'App launch',
+  AFTER_HOURS_ACCESS: 'After-hours access',
+};
+
+export const PLATFORM_LABELS = {
+  OPENAI_CHATGPT:    'ChatGPT',
+  ANTHROPIC_CLAUDE:  'Claude',
+  GOOGLE_GEMINI:     'Gemini',
+  MICROSOFT_COPILOT: 'Copilot',
+  PERPLEXITY:        'Perplexity',
+  POE:               'Poe',
+  CHARACTER_AI:      'Character.AI',
+  MISTRAL:           'Mistral',
+  GROK:              'Grok',
+  META_AI:           'Meta AI',
+  DEEPSEEK:          'DeepSeek',
+  HUGGINGFACE:       'HuggingFace',
+  YOU_COM:           'You.com',
+  PI_AI:             'Pi.ai',
+  GROQ:              'Groq',
+  COHERE:            'Cohere',
+  OTHER_AI:          'Other AI',
 };

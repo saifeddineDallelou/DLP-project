@@ -6,11 +6,12 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from loguru import logger
 
-from api_client     import DLPApiClient
-from agent_state    import AgentState
-from file_extractor import extract
+from api_client       import DLPApiClient
+from agent_state      import AgentState
+from file_extractor   import extract
+from policy_resolver  import PolicyResolver, DEFAULT_POLICY_ID
 
-POLICY_ID      = "seed-policy-pii-001"
+POLICY_ID      = DEFAULT_POLICY_ID  # fallback when no PolicyResolver is supplied
 _CLASSIFY_LIMIT = 10_000   # max chars sent to classifier per file
 _MAX_FILE_SIZE  = 20 * 1024 * 1024  # 20 MB — skip anything larger
 _COOLDOWN_SECS  = 2.0      # minimum seconds between re-scans of the same file
@@ -46,11 +47,18 @@ class _DLPHandler(FileSystemEventHandler):
     Thread-safe: watchdog may dispatch events from multiple emitter threads.
     """
 
-    def __init__(self, client: DLPApiClient, agent_id: str, state: AgentState | None = None):
+    def __init__(
+        self,
+        client: DLPApiClient,
+        agent_id: str,
+        state: AgentState | None = None,
+        policy_resolver: PolicyResolver | None = None,
+    ):
         super().__init__()
-        self.client   = client
-        self.agent_id = agent_id
-        self.state    = state
+        self.client          = client
+        self.agent_id        = agent_id
+        self.state           = state
+        self.policy_resolver = policy_resolver
         self._cooldown: dict[str, float] = {}
         self._lock = threading.Lock()   # guards cooldown dict across emitter threads
 
@@ -132,13 +140,23 @@ class _DLPHandler(FileSystemEventHandler):
         if risk_score > 0.5:
             severity = _risk_to_severity(risk_score)
             types    = [d["type"] for d in detections]
+            policy   = self.policy_resolver.resolve(detections) if self.policy_resolver else {"id": POLICY_ID, "action": "BLOCK"}
+
+            if policy["action"] == "ALLOW":
+                logger.debug(
+                    f"[FILE-WATCHER] {filename} matched a sensitive pattern but policy "
+                    f"'{policy.get('name') or policy['id']}' is set to ALLOW -- no incident created"
+                )
+                return
+
             logger.warning(
                 f"[FILE-WATCHER] SENSITIVE: {filename} | "
-                f"risk={risk_score:.2f} | severity={severity} | types={types}"
+                f"risk={risk_score:.2f} | severity={severity} | types={types} | "
+                f"policy={policy['id']} | action={policy['action']}"
             )
             incident = self.client.create_incident(
                 agent_id=self.agent_id,
-                policy_id=POLICY_ID,
+                policy_id=policy["id"],
                 severity=severity,
                 channel="FILE",
                 evidence=filename,
@@ -179,12 +197,13 @@ def start_watcher(
     client: DLPApiClient,
     agent_id: str,
     state: AgentState | None = None,
+    policy_resolver: PolicyResolver | None = None,
 ) -> Observer:
     """
     Schedule all *watch_dirs* on a single Observer with a shared handler.
     One Observer thread pool handles events from all directories.
     """
-    handler  = _DLPHandler(client, agent_id, state)
+    handler  = _DLPHandler(client, agent_id, state, policy_resolver)
     observer = Observer()
 
     for d in watch_dirs:

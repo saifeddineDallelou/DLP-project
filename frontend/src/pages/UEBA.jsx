@@ -1,49 +1,98 @@
-import { useEffect, useState } from 'react';
-import { Activity, RefreshCw, AlertTriangle } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { Activity, RefreshCw, TrendingUp, User } from 'lucide-react';
 import api from '../services/api.js';
-import { formatDate } from '../utils/format.js';
+import PageHeader from '../components/PageHeader.jsx';
+import EmptyState from '../components/EmptyState.jsx';
+import Spinner from '../components/Spinner.jsx';
+import RiskBar from '../components/RiskBar.jsx';
+import EventMetadata from '../components/EventMetadata.jsx';
+import { formatDate, EVENT_TYPE_LABELS, RISK_LEVEL_TONES } from '../utils/format.js';
 
-const EVENT_COLORS = {
-  FILE_ACCESS:        'text-sky-400     bg-sky-500/10',
-  USB_INSERT:         'text-orange-400  bg-orange-500/10',
-  CLIPBOARD_COPY:     'text-amber-400   bg-amber-500/10',
-  SCREENSHOT:         'text-violet-400  bg-violet-500/10',
-  APP_LAUNCH:         'text-slate-400   bg-slate-500/10',
-  AFTER_HOURS_ACCESS: 'text-red-400     bg-red-500/10',
-};
-
-function RiskLevel({ score }) {
-  const pct = Math.round((score ?? 0) * 100);
-  const color = pct >= 70 ? 'text-red-400' : pct >= 40 ? 'text-amber-400' : 'text-emerald-400';
-  const bar   = pct >= 70 ? 'bg-red-500'   : pct >= 40 ? 'bg-amber-500'   : 'bg-emerald-500';
+function RiskProfileCard({ profile }) {
+  const tone = RISK_LEVEL_TONES[profile.riskLevel] ?? RISK_LEVEL_TONES.LOW;
   return (
-    <div className="flex items-center gap-2">
-      <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
+    <div className="card">
+      <div className="flex items-center gap-2.5 mb-3">
+        <div className="w-8 h-8 rounded-full bg-surface-elevated flex items-center justify-center shrink-0">
+          <User size={14} className="text-ink-faint" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink truncate" title={profile.userId}>
+            {profile.userId}
+          </p>
+          <p className="text-[11px] text-ink-faint">
+            {profile.last24h.total} event{profile.last24h.total === 1 ? '' : 's'} · last 24h
+          </p>
+        </div>
+        <span className={`badge text-[10px] ${tone.text} bg-white/5`}>{profile.riskLevel}</span>
       </div>
-      <span className={`text-xs font-semibold ${color}`}>{pct}%</span>
+
+      <div className="flex items-end justify-between mb-2">
+        <span className="text-[11px] text-ink-faint">Live risk score</span>
+        <span className={`text-lg font-bold tabular-nums ${tone.text}`}>
+          {Math.round(profile.liveRiskScore * 100)}%
+        </span>
+      </div>
+      <div className="w-full h-2 bg-surface-elevated rounded-full overflow-hidden mb-3">
+        <div className={`h-full rounded-full ${tone.bar} transition-all duration-500`}
+             style={{ width: `${Math.round(profile.liveRiskScore * 100)}%` }} />
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-center pt-2 border-t border-border">
+        <div>
+          <p className="text-xs font-semibold text-ink tabular-nums">{profile.baselineRiskScore.toFixed(2)}</p>
+          <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">Baseline</p>
+        </div>
+        <div>
+          <p className="text-xs font-semibold text-ink tabular-nums">{profile.last24h.afterHoursAccess}</p>
+          <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">After-hrs</p>
+        </div>
+        <div>
+          <p className="text-xs font-semibold text-ink tabular-nums">{profile.last24h.usbInserts}</p>
+          <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">USB</p>
+        </div>
+      </div>
     </div>
   );
 }
 
 export default function UEBA() {
-  const [events, setEvents]   = useState([]);
-  const [total, setTotal]     = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter]   = useState('');
+  const [events, setEvents]     = useState([]);
+  const [total, setTotal]       = useState(0);
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [profilesLoading, setProfilesLoading] = useState(true);
+  const [filter, setFilter]     = useState('');
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const { data } = await api.get('/api/ueba/events?limit=50');
-        if (!cancelled) { setEvents(data.events ?? []); setTotal(data.total ?? 0); }
-      } catch (e) { console.error(e); }
-      finally { if (!cancelled) setLoading(false); }
+  const load = useCallback(async () => {
+    setLoading(true);
+    setProfilesLoading(true);
+    try {
+      const { data } = await api.get('/api/ueba/events?limit=100');
+      const evs = data.events ?? [];
+      setEvents(evs);
+      setTotal(data.total ?? 0);
+      setLoading(false);
+
+      const userIds = [...new Set(evs.map((e) => e.userId))];
+      const results = await Promise.all(
+        userIds.map((id) =>
+          api.get(`/api/ueba/risk-score/${id}`).then((r) => r.data).catch(() => null)
+        )
+      );
+      const withProfiles = results
+        .filter(Boolean)
+        .sort((a, b) => b.liveRiskScore - a.liveRiskScore);
+      setProfiles(withProfiles);
+    } catch (e) {
+      console.error(e);
+      setLoading(false);
+    } finally {
+      setProfilesLoading(false);
     }
-    load();
-    return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const displayed = filter
     ? events.filter(e => e.eventType === filter || e.userId?.includes(filter))
@@ -51,70 +100,82 @@ export default function UEBA() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-bold text-slate-100">UEBA</h1>
-          <p className="text-sm text-slate-400 mt-0.5">User &amp; Entity Behavior Analytics · {total} events</p>
-        </div>
-        <button onClick={() => window.location.reload()} className="btn-secondary flex items-center gap-2 text-sm">
+      <PageHeader title="UEBA" sub={`User & Entity Behavior Analytics · ${total} events tracked`}>
+        <button onClick={load} className="btn-secondary">
           <RefreshCw size={14} />
         </button>
+      </PageHeader>
+
+      {/* Risk profiles */}
+      <div className="mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <TrendingUp size={14} className="text-ink-faint" />
+          <h2 className="text-sm font-semibold text-ink">Behavioral risk by user</h2>
+        </div>
+        {profilesLoading ? (
+          <div className="flex justify-center py-10"><Spinner /></div>
+        ) : profiles.length === 0 ? (
+          <div className="card">
+            <EmptyState icon={User} title="No user risk profiles yet"
+              sub="Risk profiles appear once behavior events have been recorded for a user." />
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {profiles.map((p) => <RiskProfileCard key={p.userId} profile={p} />)}
+          </div>
+        )}
       </div>
 
-      <div className="mb-4">
-        <select
-          className="select"
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
-        >
-          <option value="">All Event Types</option>
-          {Object.keys(EVENT_COLORS).map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
+      {/* Event log */}
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-ink">Behavior event log</h2>
+        <select className="select" value={filter} onChange={e => setFilter(e.target.value)}>
+          <option value="">All event types</option>
+          {Object.entries(EVENT_TYPE_LABELS).map(([t, label]) => (
+            <option key={t} value={t}>{label}</option>
+          ))}
         </select>
       </div>
 
       <div className="card p-0 overflow-hidden">
         <table className="w-full text-left">
           <thead>
-            <tr className="border-b border-slate-800 bg-slate-900/50">
-              <th className="th">Event Type</th>
+            <tr className="border-b border-border bg-surface-elevated/50">
+              <th className="th">Event type</th>
               <th className="th">User</th>
               <th className="th">Agent</th>
-              <th className="th">Metadata</th>
+              <th className="th">Details</th>
               <th className="th">Timestamp</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="text-center py-16">
-                <div className="inline-block w-6 h-6 border-2 border-indigo-500 border-t-transparent
-                                rounded-full animate-spin" />
-              </td></tr>
+              <tr><td colSpan={5} className="text-center py-16"><Spinner /></td></tr>
             ) : displayed.length === 0 ? (
-              <tr><td colSpan={5} className="text-center py-16 text-slate-500 text-sm">
-                <Activity size={28} className="text-slate-700 mx-auto mb-2" />
-                No behavior events recorded
+              <tr><td colSpan={5}>
+                <EmptyState icon={Activity} title="No behavior events recorded" />
               </td></tr>
             ) : displayed.map((ev) => (
               <tr key={ev.id} className="table-row cursor-default">
                 <td className="td">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
-                                   ${EVENT_COLORS[ev.eventType] ?? 'text-slate-400 bg-slate-800'}`}>
-                    {ev.eventType.replace(/_/g, ' ')}
+                  <span className="badge text-[11px] bg-white/5 text-ink-soft">
+                    {EVENT_TYPE_LABELS[ev.eventType] ?? ev.eventType.replace(/_/g, ' ')}
                   </span>
                 </td>
-                <td className="td font-mono text-xs text-slate-300">{ev.userId}</td>
-                <td className="td text-xs text-slate-400">{ev.agent?.hostname ?? '—'}</td>
-                <td className="td">
-                  <pre className="text-[10px] text-slate-500 font-mono max-w-[200px] overflow-hidden truncate">
-                    {JSON.stringify(ev.metadata)}
-                  </pre>
-                </td>
-                <td className="td text-xs text-slate-500">{formatDate(ev.timestamp)}</td>
+                <td className="td font-mono text-xs text-ink">{ev.userId}</td>
+                <td className="td text-xs text-ink-faint">{ev.agent?.hostname ?? '—'}</td>
+                <td className="td"><EventMetadata metadata={ev.metadata} /></td>
+                <td className="td text-xs text-ink-faint">{formatDate(ev.timestamp)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Formula reference, not chart-adjacent — earns its place as a footnote for the demo */}
+      <p className="text-[11px] text-ink-faint mt-3 text-center">
+        Live score = baseline + 0.1 × after-hours events (24h) + 0.05 × USB inserts (24h), capped at 1.0
+      </p>
     </div>
   );
 }

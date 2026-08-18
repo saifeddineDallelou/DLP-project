@@ -213,6 +213,40 @@ PATTERNS: List[_Pat] = [
         confidence=0.75,
         mask=_mask_phone,
     ),
+
+    # ── Credentials / secrets (Internal Confidentiality) ────────────────────────
+    # Keyword hits alone (password, api_key, confidential, ...) are capped at
+    # 0.30 combined risk -- deliberately not enough to cross the 0.5 block
+    # threshold on their own, since bare vocabulary is a weak signal. These
+    # patterns match well-known, low-false-positive SECRET FORMATS instead
+    # (the same class of pattern tools like TruffleHog/GitGuardian use), so a
+    # genuinely leaked credential is judged as high-confidence on its own.
+    _Pat(
+        name="private_key_block",
+        pattern=re.compile(
+            r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
+        ),
+        rule="INTERNAL",
+        weight=0.55,
+        confidence=0.98,
+        mask=lambda r: "-----BEGIN [REDACTED] PRIVATE KEY-----",
+    ),
+
+    _Pat(
+        name="cloud_api_key",
+        pattern=re.compile(
+            r"\b(?:"
+            r"AKIA[0-9A-Z]{16}"           # AWS access key id
+            r"|sk-[A-Za-z0-9]{20,}"       # OpenAI-style secret key
+            r"|ghp_[A-Za-z0-9]{36}"       # GitHub personal access token
+            r"|xox[baprs]-[0-9A-Za-z\-]{10,}"  # Slack token
+            r")\b"
+        ),
+        rule="INTERNAL",
+        weight=0.55,
+        confidence=0.95,
+        mask=lambda r: _mask_tail(r, 4),
+    ),
 ]
 
 # ── Span-aware pattern runner ──────────────────────────────────────────────────

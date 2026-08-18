@@ -151,6 +151,42 @@ def test_keyword_medical_hipaa():
     assert "HIPAA" in rules
 
 
+# ── Secrets / credentials (structured, not keyword-only) ───────────────────────
+
+def test_private_key_block():
+    result = classify_text("Config dump:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n", None)
+    types = [d["type"] for d in result["detections"]]
+    assert "private_key_block" in types
+    pk = next(d for d in result["detections"] if d["type"] == "private_key_block")
+    assert pk["rule"] == "INTERNAL"
+    assert result["risk_score"] >= 0.5  # crosses the block threshold alone
+
+def test_aws_access_key():
+    result = classify_text("export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE", None)
+    types = [d["type"] for d in result["detections"]]
+    assert "cloud_api_key" in types
+    key = next(d for d in result["detections"] if d["type"] == "cloud_api_key")
+    assert key["rule"] == "INTERNAL"
+    assert result["risk_score"] >= 0.5
+
+def test_openai_style_key():
+    result = classify_text("OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456", None)
+    types = [d["type"] for d in result["detections"]]
+    assert "cloud_api_key" in types
+
+def test_github_token():
+    result = classify_text("token: ghp_1234567890abcdefghijklmnopqrstuvwxyz", None)
+    types = [d["type"] for d in result["detections"]]
+    assert "cloud_api_key" in types
+
+def test_keyword_only_credentials_stay_below_block_threshold():
+    # Bare vocabulary with no structured secret format shouldn't alone reach
+    # the 0.5 block threshold used downstream -- that's an intentional design
+    # choice (weak signal), not a bug; structured formats above cross it.
+    result = classify_text("Please update your password and api_key credentials", None)
+    assert result["risk_score"] < 0.5
+
+
 # ── Risk score cap ─────────────────────────────────────────────────────────────
 
 def test_risk_score_capped():

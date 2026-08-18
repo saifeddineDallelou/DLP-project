@@ -29,3 +29,6 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Personal scratch/prep files (not project code)
+.scratch/

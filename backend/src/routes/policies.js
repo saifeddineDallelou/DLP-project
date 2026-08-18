@@ -1,12 +1,31 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-// GET /api/policies
-router.get('/', authenticate, async (req, res, next) => {
+// GET /api/policies  (JWT Bearer OR x-agent-token -- the endpoint agent
+// reads policies at startup to pick the right compliance policy for each
+// incident it creates, based on what the classifier actually detected)
+router.get('/', async (req, res, next) => {
   try {
+    const agentToken = req.headers['x-agent-token'];
+    if (agentToken) {
+      const agent = await prisma.agent.findFirst({ where: { token: agentToken } });
+      if (!agent) return res.status(401).json({ error: 'Invalid agent token' });
+    } else {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing or invalid authorization header' });
+      }
+      try {
+        req.user = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+      } catch {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+      }
+    }
+
     const { enabled } = req.query;
     const where = enabled !== undefined ? { enabled: enabled === 'true' } : {};
     const policies = await prisma.policy.findMany({

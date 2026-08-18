@@ -5,11 +5,19 @@ from loguru import logger
 _MAX_RETRIES = 3
 _RETRY_DELAY = 2  # seconds between retries
 
+# A module-level Session reuses its underlying TCP connection pool across
+# calls. requests.request() creates and tears down a brand-new Session (and
+# therefore a fresh connection) on every single call -- on the file-dialog
+# monitor's hot path, where a classify() round trip has to finish before a
+# user's double-click commits, that repeated connection setup is pure
+# avoidable latency.
+_session = requests.Session()
+
 
 def _request(method: str, url: str, *, json=None, headers=None) -> dict | None:
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            resp = requests.request(method, url, json=json, headers=headers, timeout=10)
+            resp = _session.request(method, url, json=json, headers=headers, timeout=10)
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.ConnectionError:
@@ -102,6 +110,13 @@ class DLPApiClient:
                 "eventType": event_type,
                 "metadata":  metadata,
             },
+            headers=self._agent_headers,
+        )
+
+    def list_policies(self) -> list[dict] | None:
+        return _request(
+            "GET",
+            f"{self.backend_url}/api/policies",
             headers=self._agent_headers,
         )
 

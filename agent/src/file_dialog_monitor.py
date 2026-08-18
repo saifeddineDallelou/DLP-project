@@ -16,6 +16,21 @@ ai_domain_monitor.py rather than checking the dialog's *owner* window: for
 Chromium-based browsers the file dialog is frequently owned by an internal,
 untitled helper window rather than the visible tab window, so owner-title
 checks silently miss every real browser dialog.
+
+KNOWN GAP -- OLE drag-and-drop (dragging a file icon from Explorer directly
+onto a webpage's drop zone) is NOT covered by this module, or by any other
+monitor in this agent. Unlike clipboard copy/paste (CF_HDROP, handled in
+clipboard_watcher.py) or the native file picker (handled here), an OLE drop
+transfers the file directly between Explorer and the browser via an
+in-process COM interface (IDropTarget::Drop) -- it never touches the
+clipboard and never opens a dialog, so there is no external Win32 hook that
+can observe or veto it. Catching it would require either injecting a hook
+DLL into the browser process to intercept IDropTarget (fragile across
+browser versions, and exactly the kind of process-injection behavior
+antivirus/EDR software is built to flag), or a separate network-layer
+interception subsystem (a local TLS-inspecting proxy). Both are out of
+scope for this agent's current architecture; this is a deliberate scoping
+decision, not an oversight.
 """
 
 import ctypes
@@ -24,11 +39,18 @@ import os
 import re
 import sys
 import threading
+import time
 from loguru import logger
 from pywinauto import Desktop
 
 from api_client import DLPApiClient
-from ai_domain_monitor import _detect_platform_in_text, _enum_all_window_titles
+from ai_domain_monitor import (
+    _detect_platform_in_text,
+    _enum_all_windows,
+    _enum_all_window_titles,
+    _is_browser_window,
+    _detect_platform_via_address_bar,
+)
 from file_extractor import extract
 
 # Matches a Windows absolute path (drive-letter or UNC) anywhere in a string --
@@ -37,7 +59,15 @@ from file_extractor import extract
 # language calls the "Address:" label itself.
 _PATH_RE = re.compile(r"[A-Za-z]:\\[^\r\n]*|\\\\[^\r\n]*")
 
-_POLL_INTERVAL    = 0.4    # seconds between polls
+_POLL_INTERVAL      = 0.1    # seconds between polls -- must be fast enough to beat a
+                             # user double-clicking a file (default double-click
+                             # window is ~500 ms; the old 0.4 s poll left almost no
+                             # margin, and got worse once the address-bar UIA check
+                             # was added below)
+_PLATFORM_CACHE_TTL = 2.0    # seconds -- the address-bar check uses UI Automation,
+                             # far too slow to redo on every 0.1 s poll
+_FOLDER_CACHE_TTL   = 3.0    # seconds -- how often to re-resolve the dialog's
+                             # current folder in case the user navigates elsewhere
 _MAX_CLASSIFY     = 5_000  # max chars sent to classifier
 _MAX_FILE_SIZE    = 20 * 1024 * 1024
 _DIALOG_CLASS     = "#32770"  # standard Windows common-dialog class
@@ -127,14 +157,48 @@ except Exception as exc:
     _KNOWN_FOLDER_MAP = {}
 
 
+# Cache for the address-bar tier only -- window-title matching stays
+# uncached since it's cheap and needs to be instantly fresh. This loop is a
+# single thread, so a plain module-level cache (no lock) is enough.
+_platform_url_cache: str | None = None
+_platform_url_cache_time: float = 0.0
+
+
 def _active_ai_platform() -> str | None:
-    """Return a matched AI platform name if any currently visible window
-    title mentions one, else None."""
-    for title in _enum_all_window_titles():
+    """
+    Return a matched AI platform name if one is currently active, else None.
+
+    Checks window titles first (cheap, always fresh), then falls back to
+    reading browser address bars via UI Automation -- needed because pages
+    like ChatGPT rewrite their tab title to the conversation topic once you
+    start chatting, so the title stops mentioning the platform at all while
+    the URL still does. The address-bar check is cached for
+    _PLATFORM_CACHE_TTL seconds: it's UI-Automation-slow, and this function
+    now runs on every _POLL_INTERVAL (0.1 s) tick while a dialog is open, so
+    redoing it uncached would make the dialog-close race even worse than the
+    latency it's meant to fix.
+    """
+    global _platform_url_cache, _platform_url_cache_time
+
+    windows = _enum_all_windows()
+
+    for _hwnd, title in windows:
         platform = _detect_platform_in_text(title)
         if platform:
             return platform
-    return None
+
+    now = time.monotonic()
+    if now - _platform_url_cache_time > _PLATFORM_CACHE_TTL:
+        found = None
+        for hwnd, title in windows:
+            if _is_browser_window(title):
+                found = _detect_platform_via_address_bar(hwnd)
+                if found:
+                    break
+        _platform_url_cache      = found
+        _platform_url_cache_time = now
+
+    return _platform_url_cache
 
 
 def _find_dialog_windows() -> list[int]:
@@ -233,22 +297,32 @@ def _dialog_monitor_loop(
     client: DLPApiClient,
     agent_id: str,
     stop: threading.Event,
+    policy_resolver=None,
 ) -> None:
     # hwnd -> last filename text already classified, so we don't re-scan on
     # every poll while the user is still just browsing with nothing typed
     seen: dict[int, str] = {}
+    # hwnd -> (resolved folder, resolved_at). Resolved eagerly as soon as the
+    # dialog is seen, and refreshed every _FOLDER_CACHE_TTL seconds in case
+    # the user navigates elsewhere -- not resolved reactively after a
+    # filename is picked. The UI Automation call this saves is the single
+    # slowest step in the whole detection path; doing it before the user has
+    # clicked a file is what makes it possible to finish classifying and
+    # close the dialog before a fast double-click commits the pick.
+    folder_cache: dict[int, tuple[str, float]] = {}
     poll_num = 0
 
-    logger.info("[FILE-DIALOG] Loop started -- polling every 0.4 s")
+    logger.info(f"[FILE-DIALOG] Loop started -- polling every {_POLL_INTERVAL}s")
 
     while not stop.is_set():
         poll_num += 1
-        if poll_num % 150 == 0:  # ~ every 60 s
+        if poll_num % 600 == 0:  # ~ every 60 s at 0.1 s/poll
             logger.debug(f"[FILE-DIALOG] Alive | poll=#{poll_num}")
 
         for hwnd in list(seen):
             if not _user32.IsWindow(hwnd):
                 del seen[hwnd]
+                folder_cache.pop(hwnd, None)
 
         dialogs = _find_dialog_windows()
         if not dialogs:
@@ -269,20 +343,26 @@ def _dialog_monitor_loop(
         logger.info(f"[FILE-DIALOG] AI platform active: {platform}")
 
         for hwnd in dialogs:
+            # Resolve the folder now, while the user is still just browsing --
+            # not after they've already clicked a file. Doing this eagerly
+            # instead of reactively after filename-change detection is what
+            # actually closes the double-click race (see folder_cache above).
+            cached_folder = folder_cache.get(hwnd)
+            if cached_folder is None or (time.monotonic() - cached_folder[1]) > _FOLDER_CACHE_TTL:
+                folder_cache[hwnd] = (_get_dialog_folder(hwnd) or "", time.monotonic())
+
             filename_text = _get_dialog_filename(hwnd)
             logger.info(f"[FILE-DIALOG] hwnd={hwnd} filename field: {filename_text!r}")
             if not filename_text or seen.get(hwnd) == filename_text:
                 continue
             seen[hwnd] = filename_text
 
-            folder: str | None = None  # resolved lazily, at most once per hwnd tick
+            folder = folder_cache[hwnd][0]
             for name in _candidate_paths(filename_text):
                 path = name
                 if not os.path.isfile(path):
                     # Bare filename from a single-click selection -- resolve
                     # against the dialog's current folder instead.
-                    if folder is None:
-                        folder = _get_dialog_folder(hwnd) or ""
                     path = os.path.join(folder, name) if folder else path
                 if not os.path.isfile(path):
                     logger.debug(f"[FILE-DIALOG] Could not resolve '{name}' to a real file")
@@ -294,11 +374,15 @@ def _dialog_monitor_loop(
                 if size == 0 or size > _MAX_FILE_SIZE:
                     continue
 
+                t_extract_start = time.monotonic()
                 text = extract(path)
+                t_extract_ms = (time.monotonic() - t_extract_start) * 1000
                 if not text:
                     continue
 
+                t_classify_start = time.monotonic()
                 result = client.classify(text=text[:_MAX_CLASSIFY])
+                t_classify_ms = (time.monotonic() - t_classify_start) * 1000
                 if result is None:
                     logger.warning("[FILE-DIALOG] Classifier unavailable -- skipping")
                     continue
@@ -310,17 +394,34 @@ def _dialog_monitor_loop(
 
                 logger.info(
                     f"[FILE-DIALOG] {filename} classified | platform={platform} | "
-                    f"risk={risk_score:.3f} | types={types}"
+                    f"risk={risk_score:.3f} | types={types} | "
+                    f"extract={t_extract_ms:.0f}ms classify={t_classify_ms:.0f}ms"
                 )
 
                 if risk_score <= 0.5:
                     continue
 
-                logger.critical(
-                    f"[FILE-DIALOG] !! SENSITIVE FILE PICK BLOCKED -- {filename} "
-                    f"-> {platform} | risk={risk_score:.2f} | types={types}"
+                policy = (
+                    policy_resolver.resolve(detections)
+                    if policy_resolver
+                    else {"id": None, "action": "BLOCK", "name": None}
                 )
-                _close_dialog(hwnd)
+                action = policy["action"]
+
+                if action == "ALLOW":
+                    logger.debug(
+                        f"[FILE-DIALOG] {filename} sensitive but policy "
+                        f"'{policy.get('name') or 'default'}' allows it -- no block, no report"
+                    )
+                    continue
+
+                blocked = action in ("BLOCK", "QUARANTINE")
+                logger.critical(
+                    f"[FILE-DIALOG] !! SENSITIVE FILE PICK {'BLOCKED' if blocked else 'DETECTED (ALERT only)'} "
+                    f"-- {filename} -> {platform} | risk={risk_score:.2f} | types={types} | action={action}"
+                )
+                if blocked:
+                    _close_dialog(hwnd)
 
                 attempt = client.report_ai_leak_attempt(
                     agent_id=agent_id,
@@ -328,7 +429,7 @@ def _dialog_monitor_loop(
                     method="BROWSER",
                     content_sample=f"FILE:{filename}"[:100],
                     risk_score=risk_score,
-                    blocked=True,
+                    blocked=blocked,
                 )
                 if attempt:
                     logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
@@ -342,6 +443,7 @@ def start_file_dialog_monitor(
     client: DLPApiClient,
     agent_id: str,
     stop: threading.Event,
+    policy_resolver=None,
 ) -> threading.Thread:
     if sys.platform != "win32":
         logger.warning("[FILE-DIALOG] Non-Windows -- file dialog monitor disabled")
@@ -349,10 +451,10 @@ def start_file_dialog_monitor(
 
     t = threading.Thread(
         target=_dialog_monitor_loop,
-        args=(client, agent_id, stop),
+        args=(client, agent_id, stop, policy_resolver),
         daemon=True,
         name="file-dialog-monitor",
     )
     t.start()
-    logger.info("File dialog monitor started  (0.4 s poll, cancels sensitive file picks in AI tabs)")
+    logger.info(f"File dialog monitor started  ({_POLL_INTERVAL}s poll, cancels sensitive file picks in AI tabs)")
     return t

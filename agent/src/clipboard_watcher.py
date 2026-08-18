@@ -128,19 +128,24 @@ def _scan_copied_files(
 
         sample = f"FILE:{filename} | {_mask(text)}"
 
-        blocked = blocker.check_and_block(
+        action_taken = blocker.check_and_block(
             t_detect=t_change,
             content_sample=sample,
             risk_score=risk_score,
             source_tag="CLIPBOARD_FILE",
+            detections=detections,
         )
 
-        if not blocked:
+        if action_taken is None:
             state.flag_sensitive_clipboard()
             logger.warning(
                 "[CLIPBOARD] No AI window active now -- "
                 "flagged for AI monitor (will block within 1 s of opening AI tab)"
             )
+            action_taken = "ALERT"  # still worth an audit record below, just not blocked yet
+
+        if action_taken == "ALLOW":
+            continue  # policy says let this through -- no audit record either
 
         attempt = client.report_ai_leak_attempt(
             agent_id=agent_id,
@@ -148,11 +153,11 @@ def _scan_copied_files(
             method="CLIPBOARD",
             content_sample=sample,
             risk_score=risk_score,
-            blocked=blocked,
+            blocked=(action_taken in ("BLOCK", "QUARANTINE")),
         )
         if attempt:
             logger.success(
-                f"[CLIPBOARD] File leak attempt recorded: id={attempt.get('id')} | blocked={blocked}"
+                f"[CLIPBOARD] File leak attempt recorded: id={attempt.get('id')} | action={action_taken}"
             )
         else:
             logger.error("[CLIPBOARD] Failed to record file leak attempt -- backend may be down")
@@ -247,43 +252,51 @@ def _clipboard_loop(
             )
 
             # ── IMMEDIATE CHECK: is an AI window open right now? ──────────────
-            blocked = blocker.check_and_block(
+            action_taken = blocker.check_and_block(
                 t_detect=t_change,
                 content_sample=_mask(current),
                 risk_score=risk_score,
                 source_tag="CLIPBOARD",
+                detections=detections,
             )
 
-            if blocked:
-                logger.warning(
-                    "[CLIPBOARD] Immediate block applied -- "
-                    "AI window was active at copy time"
-                )
+            if action_taken == "ALLOW":
+                logger.debug("[CLIPBOARD] Policy allows this content -- no block, no report")
             else:
-                # No AI window open yet — flag state so the 1 s AI monitor
-                # loop will block when the user navigates to one.
-                state.flag_sensitive_clipboard()
-                logger.warning(
-                    "[CLIPBOARD] No AI window active now -- "
-                    "flagged for AI monitor (will block within 1 s of opening AI tab)"
-                )
+                if action_taken in ("BLOCK", "QUARANTINE"):
+                    logger.warning(
+                        "[CLIPBOARD] Immediate block applied -- "
+                        "AI window was active at copy time"
+                    )
+                elif action_taken == "ALERT":
+                    logger.warning("[CLIPBOARD] Policy set to ALERT -- reporting without blocking")
+                else:
+                    # No AI window open yet — flag state so the 1 s AI monitor
+                    # loop will block when the user navigates to one.
+                    state.flag_sensitive_clipboard()
+                    logger.warning(
+                        "[CLIPBOARD] No AI window active now -- "
+                        "flagged for AI monitor (will block within 1 s of opening AI tab)"
+                    )
 
-            # Always record the clipboard leak attempt for audit trail
-            attempt = client.report_ai_leak_attempt(
-                agent_id=agent_id,
-                platform="OTHER_AI",
-                method="CLIPBOARD",
-                content_sample=_mask(current),
-                risk_score=risk_score,
-                blocked=blocked,
-            )
-            if attempt:
-                logger.success(
-                    f"[CLIPBOARD] Leak attempt recorded: id={attempt.get('id')} | "
-                    f"blocked={blocked}"
+                # Always record the clipboard leak attempt for audit trail
+                # (unless the policy said ALLOW, handled above)
+                blocked = action_taken in ("BLOCK", "QUARANTINE")
+                attempt = client.report_ai_leak_attempt(
+                    agent_id=agent_id,
+                    platform="OTHER_AI",
+                    method="CLIPBOARD",
+                    content_sample=_mask(current),
+                    risk_score=risk_score,
+                    blocked=blocked,
                 )
-            else:
-                logger.error("[CLIPBOARD] Failed to record attempt -- backend may be down")
+                if attempt:
+                    logger.success(
+                        f"[CLIPBOARD] Leak attempt recorded: id={attempt.get('id')} | "
+                        f"blocked={blocked}"
+                    )
+                else:
+                    logger.error("[CLIPBOARD] Failed to record attempt -- backend may be down")
 
         stop.wait(_POLL_INTERVAL)
 

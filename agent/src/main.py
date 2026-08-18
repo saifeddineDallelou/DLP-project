@@ -16,6 +16,7 @@ load_dotenv(_ENV_PATH)
 
 from agent_state        import AgentState
 from api_client         import DLPApiClient
+from policy_resolver    import PolicyResolver
 from file_watcher       import start_watcher
 from clipboard_watcher  import start_clipboard_watcher
 from ai_domain_monitor  import start_ai_domain_monitor
@@ -78,8 +79,12 @@ def _heartbeat_loop(
 def main() -> None:
     print(_BANNER, flush=True)
 
-    backend_url        = os.getenv("BACKEND_URL",        "http://localhost:3001")
-    classifier_url     = os.getenv("CLASSIFIER_URL",     "http://localhost:8000")
+    # 127.0.0.1, not "localhost" -- resolving "localhost" can cost ~2s on
+    # first use on Windows (IPv6 ::1 attempted before falling back to IPv4),
+    # which is long enough to lose the race against a fast double-click in
+    # the file-dialog monitor.
+    backend_url        = os.getenv("BACKEND_URL",        "http://127.0.0.1:3001")
+    classifier_url     = os.getenv("CLASSIFIER_URL",     "http://127.0.0.1:8000")
     heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
 
     # Support WATCH_DIRS (comma-separated) with fallback to legacy WATCH_DIR
@@ -125,6 +130,12 @@ def main() -> None:
     shared = AgentState()
     stop   = threading.Event()
 
+    # Fetch policies once at startup so incidents link to the compliance
+    # policy that actually matches what was detected (PCI-DSS, HIPAA, GDPR,
+    # ...) instead of a single hardcoded policy id for everything.
+    policy_resolver = PolicyResolver(client)
+    policy_resolver.refresh()
+
     # ── 1. Heartbeat ──────────────────────────────────────────────────────────
     if agent_id and agent_token:
         threading.Thread(
@@ -136,11 +147,11 @@ def main() -> None:
         logger.info("[1/8] Heartbeat thread started")
 
     # ── 2. File watcher ───────────────────────────────────────────────────────
-    observer = start_watcher([str(p) for p in watch_paths], client, agent_id or "", shared)
+    observer = start_watcher([str(p) for p in watch_paths], client, agent_id or "", shared, policy_resolver)
     logger.info("[2/8] File watcher started")
 
     # ── 4. AI domain monitor (creates AiBlocker shared with clipboard watcher) ──
-    _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop)
+    _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop, policy_resolver)
     logger.info("[4/8] AI domain monitor started")
 
     # ── 3. Clipboard watcher (receives blocker for immediate check-and-block) ──
@@ -152,7 +163,7 @@ def main() -> None:
     logger.info("[5/8] UEBA collector started")
 
     # ── 6. Screenshot monitor ─────────────────────────────────────────────────
-    start_screenshot_monitor(client, agent_id or "", stop)
+    start_screenshot_monitor(client, agent_id or "", stop, policy_resolver)
     logger.info("[6/8] Screenshot monitor started")
 
     # ── 7. App launch monitor ─────────────────────────────────────────────────
@@ -160,7 +171,7 @@ def main() -> None:
     logger.info("[7/8] App launch monitor started")
 
     # ── 8. File dialog monitor (blocks sensitive file picks in AI tabs) ──────
-    start_file_dialog_monitor(client, agent_id or "", stop)
+    start_file_dialog_monitor(client, agent_id or "", stop, policy_resolver)
     logger.info("[8/8] File dialog monitor started")
 
     logger.success(

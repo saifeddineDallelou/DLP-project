@@ -1,36 +1,20 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Plus, Pencil, Trash2, Shield, RefreshCw, ChevronRight } from 'lucide-react';
+import { Plus, Pencil, Trash2, Shield, RefreshCw } from 'lucide-react';
 import api from '../services/api.js';
 import Modal from '../components/Modal.jsx';
-import { SEVERITY_STYLES, formatDate } from '../utils/format.js';
-
-const ACTION_COLORS = {
-  ALLOW:      'text-emerald-400 bg-emerald-500/10',
-  ALERT:      'text-amber-400   bg-amber-500/10',
-  BLOCK:      'text-red-400     bg-red-500/10',
-  QUARANTINE: 'text-violet-400  bg-violet-500/10',
-};
+import Toggle from '../components/Toggle.jsx';
+import Badge from '../components/Badge.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import EmptyState from '../components/EmptyState.jsx';
+import Spinner from '../components/Spinner.jsx';
+import ConditionsEditor from '../components/ConditionsEditor.jsx';
+import ConditionsSummary from '../components/ConditionsSummary.jsx';
+import { formatDate } from '../utils/format.js';
 
 const EMPTY_FORM = {
-  name: '', description: '', conditions: '{"patterns":[],"threshold":1}',
+  name: '', description: '', conditions: { patterns: [], threshold: 1 },
   action: 'ALERT', severity: 'MEDIUM', enabled: true,
 };
-
-function Toggle({ checked, onChange }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className={`relative w-10 h-5 rounded-full transition-colors ${
-        checked ? 'bg-indigo-600' : 'bg-slate-700'
-      }`}
-    >
-      <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-        checked ? 'translate-x-5' : 'translate-x-0.5'
-      }`} />
-    </button>
-  );
-}
 
 export default function Policies() {
   const [policies, setPolicies]     = useState([]);
@@ -63,7 +47,7 @@ export default function Policies() {
     setForm({
       name: p.name,
       description: p.description ?? '',
-      conditions: JSON.stringify(p.conditions, null, 2),
+      conditions: p.conditions ?? { patterns: [], threshold: 1 },
       action: p.action,
       severity: p.severity,
       enabled: p.enabled,
@@ -74,18 +58,13 @@ export default function Policies() {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    let conditions;
-    try {
-      conditions = JSON.parse(form.conditions);
-    } catch {
-      setFormError('Conditions must be valid JSON');
-      return;
-    }
+    if (!form.name.trim()) { setFormError('Name is required'); return; }
     setSaving(true);
+    setFormError('');
     try {
       const payload = {
         name: form.name, description: form.description || undefined,
-        conditions, action: form.action, severity: form.severity, enabled: form.enabled,
+        conditions: form.conditions, action: form.action, severity: form.severity, enabled: form.enabled,
       };
       if (editTarget?.id) {
         await api.put(`/api/policies/${editTarget.id}`, payload);
@@ -114,78 +93,63 @@ export default function Policies() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-bold text-slate-100">Policies</h1>
-          <p className="text-sm text-slate-400 mt-0.5">{policies.length} DLP policies defined</p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={fetchPolicies} className="btn-secondary flex items-center gap-2 text-sm">
-            <RefreshCw size={14} />
-          </button>
-          <button onClick={openCreate} className="btn-primary flex items-center gap-2 text-sm">
-            <Plus size={14} /> New Policy
-          </button>
-        </div>
-      </div>
+      <PageHeader title="Policies" sub={`${policies.length} DLP polic${policies.length === 1 ? 'y' : 'ies'} defined`}>
+        <button onClick={fetchPolicies} className="btn-secondary">
+          <RefreshCw size={14} />
+        </button>
+        <button onClick={openCreate} className="btn-primary">
+          <Plus size={14} /> New Policy
+        </button>
+      </PageHeader>
 
       {loading ? (
-        <div className="flex justify-center py-16">
-          <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-        </div>
+        <div className="flex justify-center py-16"><Spinner /></div>
       ) : policies.length === 0 ? (
-        <div className="card text-center py-16">
-          <Shield size={32} className="text-slate-700 mx-auto mb-3" />
-          <p className="text-slate-500 text-sm">No policies yet</p>
-          <button onClick={openCreate} className="btn-primary mt-4 text-sm">Create first policy</button>
+        <div className="card">
+          <EmptyState
+            icon={Shield}
+            title="No policies yet"
+            sub="Policies define what counts as sensitive and what the agent should do about it."
+            action={<button onClick={openCreate} className="btn-primary">Create first policy</button>}
+          />
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
           {policies.map((p) => (
-            <div key={p.id} className="card group flex flex-col gap-3">
+            <div key={p.id} className="card group flex flex-col gap-3.5">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${ACTION_COLORS[p.action] ?? ''}`}>
-                      {p.action}
-                    </span>
-                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded border ${SEVERITY_STYLES[p.severity]}`}>
-                      {p.severity}
-                    </span>
+                  <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                    <Badge tone="action" value={p.action} size="sm" />
+                    <Badge tone="severity" value={p.severity} size="sm" />
                     {!p.enabled && (
-                      <span className="text-[10px] text-slate-500 bg-slate-800 px-2 py-0.5 rounded">DISABLED</span>
+                      <span className="text-[10px] font-semibold text-ink-faint bg-white/5 px-2 py-0.5 rounded-full">
+                        DISABLED
+                      </span>
                     )}
                   </div>
-                  <h3 className="font-semibold text-slate-100 text-sm truncate">{p.name}</h3>
+                  <h3 className="font-semibold text-ink text-sm truncate">{p.name}</h3>
                   {p.description && (
-                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{p.description}</p>
+                    <p className="text-xs text-ink-faint mt-0.5 line-clamp-2">{p.description}</p>
                   )}
                 </div>
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                  <button
-                    onClick={() => openEdit(p)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
-                  >
+                  <button onClick={() => openEdit(p)} className="btn-icon hover:text-accent-text hover:bg-accent-soft">
                     <Pencil size={13} />
                   </button>
-                  <button
-                    onClick={() => setDeleteTarget(p)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                  >
+                  <button onClick={() => setDeleteTarget(p)} className="btn-icon hover:text-severity-critical-text hover:bg-severity-critical-soft">
                     <Trash2 size={13} />
                   </button>
                 </div>
               </div>
 
-              <div className="bg-slate-800/60 rounded-lg p-2.5">
-                <p className="text-[10px] text-slate-500 font-medium mb-1">CONDITIONS</p>
-                <pre className="text-[10px] text-slate-400 overflow-hidden max-h-16 font-mono">
-                  {JSON.stringify(p.conditions, null, 2)}
-                </pre>
+              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                <p className="text-[10px] text-ink-faint font-semibold uppercase tracking-wide mb-2">Conditions</p>
+                <ConditionsSummary conditions={p.conditions} />
               </div>
 
-              <div className="flex items-center justify-between text-[10px] text-slate-600 pt-1 border-t border-slate-800">
-                <span>v{p.version}</span>
+              <div className="flex items-center justify-between text-[10px] text-ink-faint pt-1 border-t border-border">
+                <span className="tabular-nums">v{p.version}</span>
                 <span>{formatDate(p.updatedAt)}</span>
               </div>
             </div>
@@ -198,43 +162,44 @@ export default function Policies() {
         open={editTarget !== null}
         onClose={() => setEditTarget(null)}
         title={editTarget?.id ? 'Edit Policy' : 'New Policy'}
+        maxWidth="max-w-xl"
       >
-        <form onSubmit={handleSave} className="space-y-4">
+        <form onSubmit={handleSave} className="space-y-5">
           {formError && (
-            <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+            <div className="text-xs text-severity-critical-text bg-severity-critical-soft border border-severity-critical/25 rounded-lg px-3 py-2">
               {formError}
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">Name *</label>
+            <label className="label">Name *</label>
             <input className="input" value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))} required />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">Description</label>
+            <label className="label">Description</label>
             <textarea className="input resize-none" rows={2} value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">Conditions (JSON) *</label>
-            <textarea className="input font-mono text-xs resize-none" rows={4}
+          <div className="border-t border-border pt-4">
+            <ConditionsEditor
               value={form.conditions}
-              onChange={e => setForm(f => ({ ...f, conditions: e.target.value }))} required />
+              onChange={(conditions) => setForm(f => ({ ...f, conditions }))}
+            />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 border-t border-border pt-4">
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Action</label>
+              <label className="label">Action</label>
               <select className="select w-full" value={form.action}
                 onChange={e => setForm(f => ({ ...f, action: e.target.value }))}>
                 {['ALLOW','ALERT','BLOCK','QUARANTINE'].map(a => <option key={a}>{a}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Severity</label>
+              <label className="label">Severity</label>
               <select className="select w-full" value={form.severity}
                 onChange={e => setForm(f => ({ ...f, severity: e.target.value }))}>
                 {['LOW','MEDIUM','HIGH','CRITICAL'].map(s => <option key={s}>{s}</option>)}
@@ -242,11 +207,12 @@ export default function Policies() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between py-2">
-            <span className="text-xs font-medium text-slate-400">Enabled</span>
+          <div className="flex items-center justify-between py-1">
+            <span className="text-sm font-medium text-ink-soft">Enabled</span>
             <Toggle
               checked={form.enabled}
               onChange={v => setForm(f => ({ ...f, enabled: v }))}
+              label="Policy enabled"
             />
           </div>
 
@@ -264,8 +230,8 @@ export default function Policies() {
       {/* Delete Confirm */}
       <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete Policy" maxWidth="max-w-sm">
         <div className="space-y-4">
-          <p className="text-sm text-slate-300">
-            Are you sure you want to delete <strong className="text-white">{deleteTarget?.name}</strong>?
+          <p className="text-sm text-ink-soft">
+            Are you sure you want to delete <strong className="text-ink">{deleteTarget?.name}</strong>?
             This action cannot be undone.
           </p>
           <div className="flex gap-3">

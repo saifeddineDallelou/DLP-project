@@ -1,7 +1,9 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://localhost:3001',
+  // 127.0.0.1, not "localhost" -- resolving "localhost" costs ~2s on first
+  // use on Windows (IPv6 attempted before falling back to IPv4).
+  baseURL: 'http://127.0.0.1:3001',
   timeout: 10000,
 });
 

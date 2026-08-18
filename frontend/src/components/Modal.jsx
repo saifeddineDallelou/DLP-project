@@ -13,17 +13,16 @@ export default function Modal({ open, onClose, title, children, maxWidth = 'max-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-[fadeIn_0.15s_ease-out]"
         onClick={onClose}
       />
-      <div className={`relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl
-                       w-full ${maxWidth} max-h-[90vh] flex flex-col`}>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
-          <h2 className="text-base font-semibold text-slate-100">{title}</h2>
-          <button
-            onClick={onClose}
-            className="text-slate-500 hover:text-slate-200 transition-colors rounded-lg p-1 hover:bg-slate-700"
-          >
+      <div
+        className={`relative bg-surface-elevated border border-border-strong rounded-2xl shadow-elevated
+                   w-full ${maxWidth} max-h-[90vh] flex flex-col animate-[modalIn_0.16s_ease-out]`}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+          <h2 className="text-base font-semibold text-ink">{title}</h2>
+          <button onClick={onClose} className="btn-icon">
             <X size={16} />
           </button>
         </div>
@@ -31,6 +30,10 @@ export default function Modal({ open, onClose, title, children, maxWidth = 'max-
           {children}
         </div>
       </div>
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes modalIn { from { opacity: 0; transform: translateY(6px) scale(0.98) } to { opacity: 1; transform: none } }
+      `}</style>
     </div>
   );
 }
