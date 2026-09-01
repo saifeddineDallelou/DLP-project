@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Filter, RefreshCw, PlayCircle, CheckCircle2, XCircle, RotateCcw } from 'lucide-react';
+import { Filter, RefreshCw, PlayCircle, CheckCircle2, XCircle, RotateCcw, Flag } from 'lucide-react';
 import api from '../services/api.js';
 import Modal from '../components/Modal.jsx';
 import Badge from '../components/Badge.jsx';
@@ -24,6 +24,7 @@ export default function Incidents() {
   const [selected, setSelected]   = useState(null);
   const [loading, setLoading]     = useState(true);
   const [updating, setUpdating]   = useState(false);
+  const [adminNoteDraft, setAdminNoteDraft] = useState('');
   const LIMIT = 15;
 
   const fetchIncidents = useCallback(async () => {
@@ -51,6 +52,20 @@ export default function Incidents() {
     setUpdating(true);
     try {
       const { data } = await api.patch(`/api/incidents/${selected.id}`, { status, ...extra });
+      setSelected((s) => ({ ...s, ...data }));
+      fetchIncidents();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const saveAdminNote = async () => {
+    if (!selected) return;
+    setUpdating(true);
+    try {
+      const { data } = await api.patch(`/api/incidents/${selected.id}`, { adminNote: adminNoteDraft });
       setSelected((s) => ({ ...s, ...data }));
       fetchIncidents();
     } catch (e) {
@@ -113,7 +128,7 @@ export default function Incidents() {
             ) : incidents.map((inc) => {
               const ChanIcon = CHANNEL_ICON[inc.channel] ?? File;
               return (
-                <tr key={inc.id} className="table-row" onClick={() => setSelected(inc)}>
+                <tr key={inc.id} className="table-row" onClick={() => { setSelected(inc); setAdminNoteDraft(inc.adminNote ?? ''); }}>
                   <td className="td"><Badge tone="severity" value={inc.severity} size="sm" /></td>
                   <td className="td">
                     <div className="flex items-center gap-1.5 text-ink-faint">
@@ -121,7 +136,16 @@ export default function Incidents() {
                       <span className="text-xs">{inc.channel}</span>
                     </div>
                   </td>
-                  <td className="td"><Badge tone="status" value={inc.status} size="sm" /></td>
+                  <td className="td">
+                    <div className="flex items-center gap-1.5">
+                      <Badge tone="status" value={inc.status} size="sm" />
+                      {inc.reviewRequested && (
+                        <span title="Worker flagged this for review" className="text-severity-medium-text">
+                          <Flag size={12} />
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="td"><RiskBar score={inc.riskScore} /></td>
                   <td className="td font-mono text-xs text-ink-faint">{inc.agent?.hostname ?? '—'}</td>
                   <td className="td text-xs text-ink-faint truncate max-w-[140px]">{inc.policy?.name ?? '—'}</td>
@@ -177,6 +201,37 @@ export default function Incidents() {
                 <p className="text-xs text-severity-low-text">Resolved at {formatDate(selected.resolvedAt)}</p>
               </div>
             )}
+
+            {selected.reviewRequested && (
+              <div className="bg-severity-medium-soft border border-severity-medium/25 rounded-lg p-3">
+                <p className="text-[10px] font-semibold text-severity-medium-text uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <Flag size={11} /> Worker flagged this for review
+                </p>
+                <p className="text-xs text-ink break-words">
+                  {selected.justification || <span className="text-ink-faint italic">No note left</span>}
+                </p>
+              </div>
+            )}
+
+            {/* Admin explanation -- the admin's own disposition after
+                investigating, separate from the worker's note above */}
+            <div>
+              <p className="label mb-1.5">Admin note</p>
+              <textarea
+                className="input w-full text-xs resize-none"
+                rows={3}
+                placeholder="Record what you found and the disposition..."
+                value={adminNoteDraft}
+                onChange={(e) => setAdminNoteDraft(e.target.value)}
+              />
+              <button
+                className="btn-secondary text-xs mt-2"
+                disabled={updating || adminNoteDraft === (selected.adminNote ?? '')}
+                onClick={saveAdminNote}
+              >
+                Save note
+              </button>
+            </div>
 
             {/* Triage actions */}
             <div className="border-t border-border pt-4">

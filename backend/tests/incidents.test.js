@@ -70,6 +70,96 @@ describe('POST /api/incidents', () => {
   });
 });
 
+describe('PATCH /api/incidents/:id/request-review', () => {
+  test('requires x-agent-token', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const incident = await prisma.incident.create({
+      data: { agentId: agent.id, policyId: policy.id, channel: 'CLIPBOARD' },
+    });
+    const res = await request(app)
+      .patch(`/api/incidents/${incident.id}/request-review`)
+      .send({ note: 'Needed for the client demo' });
+    expect(res.status).toBe(401);
+  });
+
+  test('rejects a token belonging to a different agent', async () => {
+    const owner = await createAgent();
+    const other = await createAgent();
+    const policy = await createPolicy();
+    const incident = await prisma.incident.create({
+      data: { agentId: owner.id, policyId: policy.id, channel: 'CLIPBOARD' },
+    });
+    const res = await request(app)
+      .patch(`/api/incidents/${incident.id}/request-review`)
+      .set('x-agent-token', other.token)
+      .send({ note: 'Needed for the client demo' });
+    expect(res.status).toBe(401);
+  });
+
+  test('the note is optional -- an empty request still flags it for review', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const incident = await prisma.incident.create({
+      data: { agentId: agent.id, policyId: policy.id, channel: 'CLIPBOARD' },
+    });
+    const res = await request(app)
+      .patch(`/api/incidents/${incident.id}/request-review`)
+      .set('x-agent-token', agent.token)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviewRequested).toBe(true);
+    expect(res.body.justification).toBeNull();
+  });
+
+  test('marks the incident reviewRequested with the worker note, but does not resolve it', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const incident = await prisma.incident.create({
+      data: { agentId: agent.id, policyId: policy.id, channel: 'CLIPBOARD' },
+    });
+    const res = await request(app)
+      .patch(`/api/incidents/${incident.id}/request-review`)
+      .set('x-agent-token', agent.token)
+      .send({ note: 'This looked like a false positive to me' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviewRequested).toBe(true);
+    expect(res.body.justification).toBe('This looked like a false positive to me');
+    expect(res.body.status).toBe('OPEN');
+  });
+
+  test('404s for a nonexistent incident', async () => {
+    const agent = await createAgent();
+    const res = await request(app)
+      .patch('/api/incidents/00000000-0000-0000-0000-000000000000/request-review')
+      .set('x-agent-token', agent.token)
+      .send({ note: 'x' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('PATCH /api/incidents/:id (adminNote)', () => {
+  test('an admin can record their explanation after reviewing', async () => {
+    const { user } = await createUser({ role: 'ADMIN' });
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const incident = await prisma.incident.create({
+      data: { agentId: agent.id, policyId: policy.id, channel: 'CLIPBOARD', reviewRequested: true },
+    });
+
+    const res = await request(app)
+      .patch(`/api/incidents/${incident.id}`)
+      .set('Authorization', authHeader(user))
+      .send({ adminNote: 'Confirmed with the employee -- approved use, closing.', status: 'RESOLVED' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.adminNote).toBe('Confirmed with the employee -- approved use, closing.');
+    expect(res.body.status).toBe('RESOLVED');
+  });
+});
+
 describe('GET /api/incidents', () => {
   test('requires auth', async () => {
     const res = await request(app).get('/api/incidents');

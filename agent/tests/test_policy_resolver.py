@@ -3,10 +3,15 @@ from unittest.mock import MagicMock
 from policy_resolver import PolicyResolver, DEFAULT_POLICY_ID, DEFAULT_ACTION
 
 
-def _policy(id_, rule, enabled=True, action="BLOCK", name=None):
+def _policy(id_, rule, enabled=True, action="BLOCK", name=None, patterns=None, threshold=None):
+    conditions = {"complianceRule": rule}
+    if patterns is not None:
+        conditions["patterns"] = patterns
+    if threshold is not None:
+        conditions["threshold"] = threshold
     return {
         "id": id_, "enabled": enabled, "action": action, "name": name or id_,
-        "conditions": {"complianceRule": rule},
+        "conditions": conditions,
     }
 
 
@@ -140,3 +145,94 @@ class TestResolve:
         )
         assert resolver.resolve([{"rule": "PCI-DSS"}])["action"] == "ALERT"
         assert resolver.resolve([{"rule": "HIPAA"}])["action"] == "QUARANTINE"
+
+
+class TestPatternsAndThresholdGate:
+    def _resolver_with_policy(self, patterns=None, threshold=None):
+        client = MagicMock()
+        client.list_policies.return_value = [
+            _policy("pci-1", "PCI-DSS", patterns=patterns, threshold=threshold),
+        ]
+        resolver = PolicyResolver(client, default_policy_id="fallback")
+        resolver.refresh()
+        return resolver
+
+    def test_matches_when_a_detection_type_is_in_patterns(self):
+        resolver = self._resolver_with_policy(patterns=["CREDIT_CARD", "SSN"])
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        assert resolver.resolve(detections)["id"] == "pci-1"
+
+    def test_falls_through_to_default_when_no_detection_type_is_in_patterns(self):
+        # The policy's patterns list no longer includes CREDIT_CARD -- a
+        # credit-card-only detection should no longer trigger this policy,
+        # even though it still matches the compliance rule.
+        resolver = self._resolver_with_policy(patterns=["SSN"])
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        assert resolver.resolve(detections)["id"] == "fallback"
+
+    def test_empty_patterns_list_means_unrestricted(self):
+        resolver = self._resolver_with_policy(patterns=[])
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        assert resolver.resolve(detections)["id"] == "pci-1"
+
+    def test_threshold_requires_enough_matching_detections(self):
+        resolver = self._resolver_with_policy(patterns=["CREDIT_CARD"], threshold=2)
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        assert resolver.resolve(detections)["id"] == "fallback"
+
+        detections_x2 = [
+            {"rule": "PCI-DSS", "type": "credit_card"},
+            {"rule": "PCI-DSS", "type": "credit_card"},
+        ]
+        assert resolver.resolve(detections_x2)["id"] == "pci-1"
+
+    def test_threshold_without_patterns_counts_rule_matching_detections(self):
+        resolver = self._resolver_with_policy(threshold=2)
+        assert resolver.resolve([{"rule": "PCI-DSS", "type": "credit_card"}])["id"] == "fallback"
+        assert resolver.resolve([
+            {"rule": "PCI-DSS", "type": "credit_card"},
+            {"rule": "PCI-DSS", "type": "iban"},
+        ])["id"] == "pci-1"
+
+    def test_gate_is_case_insensitive_on_detection_type(self):
+        resolver = self._resolver_with_policy(patterns=["CREDIT_CARD"])
+        assert resolver.resolve([{"rule": "PCI-DSS", "type": "credit_card"}])["id"] == "pci-1"
+
+    def test_keyword_detection_matches_patterns_via_value_not_type(self):
+        # Classifier keyword hits always carry type="keyword" -- the actual
+        # keyword is in `value` -- so a policy listing "PASSWORD" in its
+        # patterns must match against value, not the always-"keyword" type.
+        resolver = self._resolver_with_policy(patterns=["PASSWORD", "API_KEY"])
+        detections = [{"rule": "PCI-DSS", "type": "keyword", "value": "password"}]
+        assert resolver.resolve(detections)["id"] == "pci-1"
+
+    def test_keyword_detection_with_unmatched_value_falls_through(self):
+        resolver = self._resolver_with_policy(patterns=["PASSWORD"])
+        detections = [{"rule": "PCI-DSS", "type": "keyword", "value": "salary"}]
+        assert resolver.resolve(detections)["id"] == "fallback"
+
+    def test_pattern_typed_with_a_space_still_matches_underscored_detection_type(self):
+        # A human typing into the dashboard naturally writes "CREDIT CARD",
+        # not "CREDIT_CARD" -- the classifier's detection type is always
+        # underscore-separated ("credit_card"), so the stored pattern must
+        # be normalized the same way or it silently never matches.
+        resolver = self._resolver_with_policy(patterns=["CREDIT CARD"])
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        assert resolver.resolve(detections)["id"] == "pci-1"
+
+    def test_keyword_detection_value_match_is_case_and_space_insensitive(self):
+        resolver = self._resolver_with_policy(patterns=["API_KEY"])
+        detections = [{"rule": "PCI-DSS", "type": "keyword", "value": "api key"}]
+        assert resolver.resolve(detections)["id"] == "pci-1"
+
+    def test_failed_gate_falls_through_to_next_matching_detection(self):
+        client = MagicMock()
+        client.list_policies.return_value = [
+            _policy("pci-1", "PCI-DSS", patterns=["SSN"]),
+            _policy("hipaa-1", "HIPAA"),
+        ]
+        resolver = PolicyResolver(client, default_policy_id="fallback")
+        resolver.refresh()
+
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}, {"rule": "HIPAA", "type": "keyword"}]
+        assert resolver.resolve(detections)["id"] == "hipaa-1"
