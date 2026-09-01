@@ -381,6 +381,31 @@ def _build_excerpt(text: str, detections: List[Dict]) -> str:
 
 # ── Public classify function ───────────────────────────────────────────────────
 
+def _run_edm(text: str) -> List[Dict[str, Any]]:
+    """
+    Exact Data Match against configured reference sets.
+
+    Reference sets are loaded on every call rather than cached, so uploading
+    one takes effect immediately -- the same reasoning as the agent's
+    3-second policy refresh. Loading is reading a JSON file of hex digests;
+    if a deployment ever indexes enough records for that to matter, a cache
+    with an mtime check is the change to make.
+
+    Deliberately non-fatal: EDM is optional, and a missing or unreadable
+    store must degrade to "no EDM detections" rather than break the whole
+    classification path that every monitor depends on.
+    """
+    try:
+        from .edm import load_reference_sets, match_text
+        sets = load_reference_sets()
+        if not sets:
+            return []
+        return match_text(text, sets)
+    except Exception as exc:   # pragma: no cover - defensive
+        logger.error(f"EDM matching failed, continuing without it: {exc}")
+        return []
+
+
 def classify_text(
     text: Optional[str],
     file_b64: Optional[str],
@@ -421,6 +446,12 @@ def classify_text(
     # ── Run detectors ──────────────────────────────────────────────────────────
     pattern_hits = _run_patterns(combined_text)
     keyword_hits = _run_keywords(combined_text)
+    # Exact Data Match runs alongside the pattern detectors, not instead of
+    # them: regex says "this looks like a card number", EDM says "this IS one
+    # of ours". They answer different questions and a document can trip either.
+    # Silently skipped when no reference set is configured, which is the
+    # default -- EDM requires an organisation to upload its own records.
+    edm_hits = _run_edm(combined_text)
 
     # ── Risk scoring ───────────────────────────────────────────────────────────
     risk = 0.0
@@ -436,8 +467,19 @@ def classify_text(
     keyword_risk = min(sum(h["_weight"] for h in keyword_hits), 0.30)
     risk = min(risk + keyword_risk, 1.0)
 
+    # An EDM hit is a match against the organisation's OWN records, which is
+    # categorically stronger evidence than a shape that merely fits -- there
+    # is no "looks like" about it. Each matched column contributes once,
+    # weighted by how many of its values appear.
+    seen_edm: set[str] = set()
+    for hit in edm_hits:
+        if hit["type"] not in seen_edm:
+            seen_edm.add(hit["type"])
+            risk += hit["_weight"]
+    risk = min(risk, 1.0)
+
     # ── Build public detections (strip internal fields) ────────────────────────
-    all_hits = pattern_hits + keyword_hits
+    all_hits = pattern_hits + keyword_hits + edm_hits
     public_detections = [
         {
             "type": h["type"],

@@ -71,7 +71,26 @@ returns a risk score, plus the list of things it found.
 - Values are **masked** in the response (`****-****-****-4242`), so sensitive
   data is never stored in an incident record
 
-It holds no state and knows nothing about policies, users or agents.
+**Exact Data Match.** Regex answers *"does this look like a card number"*.
+EDM answers *"is this **our** customer's card number"* — matching against a
+salted hash of the organisation's real records:
+
+```bash
+curl -X POST localhost:8000/edm -H 'Content-Type: application/json' -d '{
+  "name": "customers", "rule": "GDPR",
+  "rows": [{"name": "Sarah Okafor", "account": "ACC-4472819"}]
+}'
+```
+
+It catches what no pattern can — a customer name, an account reference — and
+*doesn't* fire on made-up examples or test data. **Raw values are never
+stored**; only salted HMAC digests, so uploading a customer list doesn't
+create a second copy of it. Set `EDM_SALT` per deployment.
+
+Scope, stated plainly: this matches per-value. Commercial EDM correlates
+several fields from the same *row* before firing. Not implemented.
+
+It holds no other state and knows nothing about policies, users or agents.
 
 ```bash
 cd classifier
