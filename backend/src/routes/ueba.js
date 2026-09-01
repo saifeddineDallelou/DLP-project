@@ -6,9 +6,11 @@ const {
   hoursSignal,
   median,
   combine,
+  priorityBoost,
   riskLevel,
   ZERO_BASELINE_FLOORS,
 } = require('../lib/ueba-scoring');
+const { recomputeBaseline } = require('../lib/baseline');
 
 const router = express.Router();
 
@@ -112,100 +114,22 @@ router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'A
   try {
     const { userId } = req.params;
     const days = Math.max(1, Number(req.query.days) || 30);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const events = await prisma.behaviorEvent.findMany({
-      where: { userId, timestamp: { gte: since } },
-      select: { eventType: true, metadata: true, timestamp: true },
+    // Shared with the background refresh job (lib/baseline-refresh.js) so an
+    // automatic refresh produces exactly what this button produces.
+    const result = await recomputeBaseline({
+      userId,
+      days,
+      department: req.query.department,
     });
 
-    if (events.length === 0) {
+    if (!result) {
       return res.status(404).json({
         error: `No behavior events recorded for this user in the last ${days} day(s) -- nothing to compute a baseline from`,
       });
     }
 
-    // Bucket per calendar day, so the baseline can be a median across days
-    // rather than a mean. The working-hours bounds were already outlier-
-    // resistant (10th/90th percentile, see below); file count and volume were
-    // not -- they were sum/days, so one 8 GB afternoon shifted the number every
-    // subsequent day would be judged against. A median ignores that day
-    // entirely, which is the same protection the hours already had.
-    const perDay = new Map();
-    const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
-
-    let usbInserts = 0;
-    let largeFileTransfers = 0;
-    const hours = [];
-
-    for (const e of events) {
-      const key = dayKey(e.timestamp);
-      if (!perDay.has(key)) perDay.set(key, { files: 0, volumeMB: 0, usb: 0 });
-      const day = perDay.get(key);
-
-      if (e.eventType === 'FILE_ACCESS' || e.eventType === 'AFTER_HOURS_ACCESS') {
-        day.files += Number(e.metadata?.count) || 0;
-        day.volumeMB += Number(e.metadata?.sizeMB) || 0;
-        if (typeof e.metadata?.hour === 'number') hours.push(e.metadata.hour);
-      } else if (e.eventType === 'USB_INSERT') {
-        day.usb += 1;
-        usbInserts += 1;
-      } else if (e.eventType === 'LARGE_FILE_TRANSFER') {
-        // Its own event, on top of (not part of) FILE_ACCESS/
-        // AFTER_HOURS_ACCESS -- a file over the large-file threshold is
-        // excluded from the routine content-scan path entirely (see
-        // agent/src/file_watcher.py), so its volume is never double-counted.
-        day.volumeMB += Number(e.metadata?.sizeMB) || 0;
-        largeFileTransfers += 1;
-      }
-    }
-
-    // Median across ACTIVE days only -- days the user generated no events at
-    // all are excluded rather than counted as zero. The question the baseline
-    // answers is "on a day this person is working, what is typical", and
-    // padding with weekends and leave would drag every baseline toward zero
-    // and make ordinary Monday activity look anomalous.
-    const activeDays = [...perDay.values()];
-    const medianFiles = median(activeDays.map((d) => d.files));
-    const medianVolume = median(activeDays.map((d) => d.volumeMB));
-    const medianUsb = median(activeDays.map((d) => d.usb));
-
-    hours.sort((a, b) => a - b);
-    // 10th/90th percentile rather than min/max -- a couple of one-off late
-    // nights shouldn't redefine this user's whole "working hours" baseline.
-    const percentile = (p) => hours.length ? hours[Math.floor(p * (hours.length - 1))] : null;
-    const round2 = (n) => Math.round(n * 100) / 100;
-
-    const existing = await prisma.userBehaviorBaseline.findUnique({ where: { userId } });
-    // Only overwrite the declared department when the caller actually supplies
-    // one -- a recompute is about the numbers, and silently clearing a peer
-    // group as a side effect would drop the user out of peer scoring.
-    const department = req.query.department ?? existing?.department ?? null;
-
-    const baseline = await prisma.userBehaviorBaseline.upsert({
-      where: { userId },
-      update: {
-        department,
-        avgDailyFiles: round2(medianFiles),
-        avgDailyVolumeMB: round2(medianVolume),
-        avgWorkingHourStart: percentile(0.1) ?? existing?.avgWorkingHourStart ?? 9,
-        avgWorkingHourEnd: percentile(0.9) ?? existing?.avgWorkingHourEnd ?? 18,
-        avgUsbFrequency: round2(medianUsb),
-        lastUpdated: new Date(),
-      },
-      create: {
-        userId,
-        department,
-        avgDailyFiles: round2(medianFiles),
-        avgDailyVolumeMB: round2(medianVolume),
-        avgWorkingHourStart: percentile(0.1) ?? 9,
-        avgWorkingHourEnd: percentile(0.9) ?? 18,
-        avgUsbFrequency: round2(medianUsb),
-        riskScore: 0,
-        lastUpdated: new Date(),
-      },
-    });
-
+    const { baseline, computedFrom } = result;
     // Audited like the manual path above. A recompute is derived from real
     // event history rather than typed in, but it still overwrites the numbers
     // every future risk score is measured against -- and the window (`days`)
@@ -222,27 +146,14 @@ router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'A
           monitoredUserId: userId,
           source: 'RECOMPUTED',
           days,
-          eventCount: events.length,
+          eventCount: computedFrom.eventCount,
           avgDailyFiles: baseline.avgDailyFiles,
           avgDailyVolumeMB: baseline.avgDailyVolumeMB,
         },
       },
     });
 
-    res.json({
-      ...baseline,
-      computedFrom: {
-        eventCount: events.length,
-        days,
-        activeDays: activeDays.length,
-        largeFileTransfers,
-        usbInserts,
-        // Named so the response says plainly what statistic produced these
-        // numbers -- a caller comparing two baselines needs to know one is a
-        // median across active days, not a mean across the whole window.
-        statistic: 'median-across-active-days',
-      },
-    });
+    res.json({ ...baseline, computedFrom });
   } catch (err) {
     next(err);
   }
@@ -343,7 +254,7 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
     // avgDailyVolumeMB were computed, displayed, and never read.
     const todayEvents = await prisma.behaviorEvent.findMany({
       where: { userId, timestamp: { gte: since } },
-      select: { eventType: true, metadata: true },
+      select: { eventType: true, metadata: true, agentId: true },
     });
 
     let todayFiles = 0;
@@ -436,11 +347,54 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       afterHours * 0.05 + usbInserts * 0.02 + largeFileTransfers * 0.08,
     );
 
+    // WHAT the user touched, not just how much. A deviation score cannot tell
+    // 500 MB of build artefacts from 500 MB of cardholder data.
+    //
+    // BehaviorEvent carries userId; Incident carries agentId. There is no
+    // direct link, so a user is associated with the incidents raised on the
+    // endpoints they were active on in the same window. Honest limitation: on
+    // a shared workstation this attributes an incident to whoever else was
+    // active there. Correcting it would mean the agent stamping the OS user
+    // onto every incident it reports.
+    const activeAgentIds = [...new Set(todayEvents.map((e) => e.agentId).filter(Boolean))];
+
+    let findings = [];
+    if (activeAgentIds.length > 0) {
+      const [incidents, attempts] = await Promise.all([
+        prisma.incident.findMany({
+          where: { agentId: { in: activeAgentIds }, createdAt: { gte: since } },
+          select: { severity: true, policy: { select: { conditions: true } } },
+        }),
+        prisma.aiLeakAttempt.findMany({
+          where: { agentId: { in: activeAgentIds }, timestamp: { gte: since } },
+          select: { policy: { select: { severity: true, conditions: true } } },
+        }),
+      ]);
+
+      findings = [
+        ...incidents.map((i) => ({
+          severity: i.severity,
+          rule: i.policy?.conditions?.complianceRule ?? null,
+        })),
+        // An AI leak attempt has no severity of its own -- it inherits the
+        // severity of the policy it violated. Attempts predating the policyId
+        // column have no policy at all and are skipped rather than guessed at.
+        ...attempts
+          .filter((a) => a.policy)
+          .map((a) => ({
+            severity: a.policy.severity,
+            rule: a.policy.conditions?.complianceRule ?? null,
+          })),
+      ];
+    }
+
+    const priority = priorityBoost(findings);
+
     // With no baseline there is nothing to deviate FROM, so the score falls
-    // back to the event bonuses alone rather than reporting a confident zero.
+    // back to the bonuses alone rather than reporting a confident zero.
     const liveScore = baseline
-      ? Math.min(1, deviationScore + eventBonus)
-      : Math.min(1, eventBonus);
+      ? Math.min(1, deviationScore + eventBonus + priority.boost)
+      : Math.min(1, eventBonus + priority.boost);
 
     res.json({
       userId,
@@ -452,6 +406,11 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       // metric drove the score, not just that it was high.
       deviationScore: parseFloat(deviationScore.toFixed(3)),
       eventBonus: parseFloat(eventBonus.toFixed(3)),
+      priorityBoost: parseFloat(priority.boost.toFixed(3)),
+      // Which compliance rules drove the boost, so the dashboard can say
+      // "PCI-DSS, HIPAA" rather than showing an unexplained number.
+      priorityRules: priority.rules,
+      prioritySeverities: priority.bySeverity,
       components,
       peerGroup: baseline?.department
         ? { department: baseline.department, peerCount: peers.length }

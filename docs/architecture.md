@@ -227,6 +227,40 @@ the result back down. A user with no department is scored self-relative only.
 The known limit: peer groups are admin-declared, not discovered. The agent
 reports a Windows username and has no idea what team that person is on.
 
+**Priority content.** A deviation score says how *much* moved, never whether it
+mattered — 500 MB of build artefacts and 500 MB of cardholder data deviate
+identically. The classifier already tags every detection with a compliance rule
+and the resolved `Policy` carries a severity, so incidents and AI leak attempts
+raised on the endpoints a user was active on add a capped boost weighted by
+severity. Capped, because sensitivity should sharpen a deviation score rather
+than replace it.
+
+Honest limitation: `BehaviorEvent` carries `userId` and `Incident` carries
+`agentId`, with no direct link. A user is therefore associated with incidents on
+the endpoints they were active on in the same window, which on a shared
+workstation attributes an incident to whoever else was active there. Fixing it
+properly means the agent stamping the OS user onto every incident it reports.
+
+**Baselines refresh themselves.** A baseline that only changes when an admin
+remembers to click Recompute is a snapshot of whenever that last happened, and
+it drifts out of date exactly as someone's role changes — a developer moving
+onto a data-heavy project keeps being scored against the job they used to do,
+alerting daily until somebody notices. `lib/baseline-refresh.js` recomputes any
+baseline older than `BASELINE_STALE_HOURS`, sharing `recomputeBaseline()` with
+the manual endpoint so the two cannot drift apart.
+
+A user with no events in the window is **skipped, not zeroed**: someone back
+from three weeks' leave should return to the baseline they had, not to one
+saying they normally do nothing, which would flag their first day back.
+
+Scheduled refreshes are audited with a **null actor** and `source: SCHEDULED`.
+The absent actor is the point — it separates an automatic refresh from an admin
+reshaping a baseline by hand, which is what the trail exists to catch.
+
+It is a plain `setInterval` started in `index.js`, not in `app.js`, so importing
+the app in tests never starts a timer. If this ever runs multi-instance, that is
+the piece to replace: every instance would refresh the same baselines at once.
+
 ## 6. Data model
 
 ```

@@ -162,6 +162,51 @@ function combine(components) {
   return Math.max(mean, strongest * DOMINANT_SIGNAL_FACTOR);
 }
 
+// Volume alone does not say whether what moved mattered. 500 MB of build
+// artefacts and 500 MB of cardholder data deviate identically from a baseline,
+// and only one of them is a breach. Purview scores exfiltration higher when the
+// content carries a sensitivity label or is designated priority content; the
+// same information is already available here, because the classifier tags every
+// detection with a compliance rule and the resolved Policy carries a severity.
+// It simply was not reaching the risk score.
+const PRIORITY_SEVERITY_WEIGHTS = {
+  LOW: 0.02,
+  MEDIUM: 0.05,
+  HIGH: 0.10,
+  CRITICAL: 0.15,
+};
+
+// Capped so a noisy day cannot let the boost alone carry a user to HIGH.
+// Sensitivity is meant to sharpen a deviation score, not replace it.
+const PRIORITY_BOOST_CAP = 0.30;
+
+/**
+ * Additional risk from WHAT the user touched, not just how much.
+ *
+ * `findings` is a list of { severity, rule } drawn from incidents and AI leak
+ * attempts already linked to a compliance policy. Additive with a cap: repeated
+ * exposure to sensitive data is genuinely worse than a single instance, but not
+ * without limit.
+ */
+function priorityBoost(findings) {
+  const items = (findings || []).filter(Boolean);
+  if (items.length === 0) return { boost: 0, rules: [], bySeverity: {} };
+
+  const bySeverity = {};
+  let total = 0;
+
+  for (const f of items) {
+    const weight = PRIORITY_SEVERITY_WEIGHTS[f.severity];
+    if (weight == null) continue;
+    total += weight;
+    bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+  }
+
+  const rules = [...new Set(items.map((f) => f.rule).filter(Boolean))].sort();
+
+  return { boost: Math.min(PRIORITY_BOOST_CAP, total), rules, bySeverity };
+}
+
 function riskLevel(score) {
   return score >= 0.7 ? 'HIGH' : score >= 0.4 ? 'MEDIUM' : 'LOW';
 }
@@ -171,10 +216,13 @@ module.exports = {
   DOMINANT_SIGNAL_FACTOR,
   ZERO_BASELINE_FLOORS,
   ZERO_BASELINE_MAX_SIGNAL,
+  PRIORITY_SEVERITY_WEIGHTS,
+  PRIORITY_BOOST_CAP,
   WEIGHTS,
   deviationSignal,
   hoursSignal,
   median,
   combine,
+  priorityBoost,
   riskLevel,
 };

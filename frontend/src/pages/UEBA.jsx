@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Activity, RefreshCw, TrendingUp, User, Calculator } from 'lucide-react';
+import { Activity, RefreshCw, TrendingUp, User, Calculator, ShieldAlert } from 'lucide-react';
 import api from '../services/api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -106,11 +106,29 @@ function RiskProfileCard({ profile, onRecompute, recomputing }) {
             <p className="text-[9px] text-ink-faint uppercase tracking-wide">Why this score</p>
             <p className="text-[9px] text-ink-faint tabular-nums">
               deviation {profile.deviationScore?.toFixed(2)} · events +{profile.eventBonus?.toFixed(2)}
+              {profile.priorityBoost > 0 && ` · sensitive +${profile.priorityBoost.toFixed(2)}`}
             </p>
           </div>
           {['volume', 'files', 'hours', 'usb'].map((k) => (
             <ComponentRow key={k} metricKey={k} c={profile.components[k]} />
           ))}
+
+          {/* What was touched, not just how much. Volume alone cannot separate
+              500 MB of build artefacts from 500 MB of cardholder data. */}
+          {profile.priorityBoost > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap pt-1.5 mt-1 border-t border-border/60">
+              <ShieldAlert size={11} className="text-severity-critical-text shrink-0" />
+              <span className="text-[10px] text-ink-faint">Sensitive data:</span>
+              {(profile.priorityRules ?? []).map((r) => (
+                <span key={r} className="badge text-[9px] bg-severity-critical-soft text-severity-critical-text">
+                  {r}
+                </span>
+              ))}
+              {Object.entries(profile.prioritySeverities ?? {}).map(([sev, n]) => (
+                <span key={sev} className="text-[9px] text-ink-faint">{n}× {sev}</span>
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <div className="pt-2 border-t border-border">
@@ -313,8 +331,10 @@ export default function UEBA() {
       <p className="text-[11px] text-ink-faint mt-3 text-center max-w-2xl mx-auto">
         Live score = deviation from this user&rsquo;s own baseline (volume 35% · files 25% ·
         hours 20% · USB 20%), taken against their peer group where one is declared,
-        plus a smaller bonus for after-hours, USB and large-transfer events.
+        plus smaller bonuses for after-hours / USB / large-transfer events and for
+        touching data a compliance policy rates as sensitive.
         A single fully anomalous metric is on its own enough to reach HIGH.
+        Baselines refresh automatically once stale.
       </p>
     </div>
   );
