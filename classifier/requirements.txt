@@ -1,7 +1,18 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-python-magic-bin>=0.4.14
 python-dotenv>=1.0.1
 loguru>=0.7.2
 pytest>=8.2.0
 httpx>=0.27.0
+
+# libmagic bindings, split by platform. python-magic-bin ships the Windows
+# DLL; on Linux and macOS the library comes from the OS (libmagic1 /
+# libmagic), so the pure binding is the right package. Without the split this
+# file could not be installed anywhere but Windows -- which is backwards for a
+# stateless microservice that would normally be deployed on Linux.
+#
+# engine.py already treats magic as optional (see _MAGIC_AVAILABLE), so a host
+# missing the system library degrades to "no file-type detection" rather than
+# failing to start.
+python-magic-bin>=0.4.14; sys_platform == 'win32'
+python-magic>=0.4.27; sys_platform != 'win32'

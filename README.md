@@ -1,5 +1,7 @@
 # DLP Platform
 
+[![CI](https://github.com/saifeddineDallelou/DLP-project/actions/workflows/ci.yml/badge.svg)](https://github.com/saifeddineDallelou/DLP-project/actions/workflows/ci.yml)
+
 An endpoint **Data Loss Prevention** system: it detects sensitive data (payment
 cards, national IDs, health identifiers, credentials) leaving a Windows
 workstation, and blocks the transfer before it completes — with a particular
@@ -210,10 +212,21 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 111
-cd agent      && python -m pytest -q # 275
-cd classifier && python -m pytest -q # 25
+cd backend    && npm test            # 246
+cd agent      && python -m pytest -q # 333
+cd classifier && python -m pytest -q # 40
 ```
+
+All three run on every push and pull request — see
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Three jobs across two
+platforms, which is not gratuitous:
+
+| Job | Runner | Why |
+|---|---|---|
+| backend | ubuntu | Needs a PostgreSQL service container; those are Linux-only on Actions |
+| classifier | ubuntu | A stateless microservice — Linux is where it would be deployed |
+| agent | **windows** | Imports `ctypes.wintypes`, `pywinauto`, `tkinter`. Cannot import on Linux |
+| frontend | ubuntu | Build only — no suite yet, but a broken import still fails the run |
 
 ## Repository conventions
 
