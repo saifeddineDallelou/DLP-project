@@ -11,6 +11,8 @@ const incidentsRoutes = require('./routes/incidents');
 const classifyRoutes  = require('./routes/classify');
 const uebaRoutes      = require('./routes/ueba');
 const aiPolicyRoutes  = require('./routes/ai-policy');
+const appRulesRoutes  = require('./routes/app-rules');
+const reportsRoutes   = require('./routes/reports');
 
 const app = express();
 
@@ -28,6 +30,8 @@ app.use('/api/incidents', incidentsRoutes);
 app.use('/api/classify',  classifyRoutes);
 app.use('/api/ueba',      uebaRoutes);
 app.use('/api/ai-policy', aiPolicyRoutes);
+app.use('/api/app-rules', appRulesRoutes);
+app.use('/api/reports',   reportsRoutes);
 
 // 404
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));

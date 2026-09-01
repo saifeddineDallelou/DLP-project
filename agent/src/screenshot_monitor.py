@@ -89,6 +89,21 @@ _SENSITIVE_FILENAME_KW = frozenset({
 })
 _OFFICE_EXTS = frozenset({".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt", ".pdf"})
 
+# Which compliance rule a matched title/filename keyword implies -- same rule
+# vocabulary as classifier/src/dictionaries.py -- so the title heuristic can
+# hand the policy resolver a synthetic detection instead of an empty list
+# (which always falls back to the default policy regardless of the keyword).
+_KEYWORD_RULE: dict[str, str] = {
+    "confidential": "INTERNAL", "secret": "INTERNAL", "restricted": "INTERNAL",
+    "password": "INTERNAL", "internal": "INTERNAL", "dlp": "INTERNAL",
+    "contract": "INTERNAL", "budget": "INTERNAL", "report": "INTERNAL",
+    "salary": "GDPR", "payroll": "GDPR", "personal": "GDPR", "private": "GDPR",
+    "client": "GDPR", "customer": "GDPR", "tax": "GDPR",
+    "ssn": "HIPAA", "medical": "HIPAA",
+    "iban": "PCI-DSS", "carte": "PCI-DSS", "bancaire": "PCI-DSS",
+    "bank": "PCI-DSS", "account": "PCI-DSS", "invoice": "PCI-DSS",
+}
+
 
 # ── Windows helpers ───────────────────────────────────────────────────────────
 
@@ -106,18 +121,24 @@ def _get_foreground_title() -> str:
         return ""
 
 
-def _is_sensitive(title: str) -> bool:
+def _matched_keyword(title: str) -> str | None:
+    """Return the sensitive keyword the title (or, for an Office file, its
+    filename) matched, or None if it doesn't look sensitive."""
     lower = title.lower()
     for kw in _SENSITIVE_KEYWORDS:
         if kw in lower:
-            return True
+            return kw
     for ext in _OFFICE_EXTS:
         if ext in lower:
             filename_part = lower.split(" - ")[0].strip()
             for kw in _SENSITIVE_FILENAME_KW:
                 if kw in filename_part:
-                    return True
-    return False
+                    return kw
+    return None
+
+
+def _is_sensitive(title: str) -> bool:
+    return _matched_keyword(title) is not None
 
 
 def _clipboard_seq() -> int:
@@ -237,17 +258,27 @@ def _screenshot_loop(
                 return
             _last_action[0] = now
 
-        title     = _get_foreground_title()
-        sensitive = _is_sensitive(title)
-        cleared   = False
-        policy    = None
+        title       = _get_foreground_title()
+        matched_kw  = _matched_keyword(title)
+        cleared     = False
+        policy      = None
+        detections: list = []
 
-        if sensitive:
+        if matched_kw:
             # No classify() call happens on this path (title-heuristic only),
-            # so there are no compliance-tagged detections to hand the policy
-            # resolver -- it'll fall back to the default policy for these.
+            # but the matched keyword still implies a compliance rule (see
+            # _KEYWORD_RULE), so build a synthetic detection from it rather
+            # than resolving against an empty list -- an empty list always
+            # falls back to the default policy regardless of which keyword
+            # actually matched.
+            detections = [{
+                "type":       "keyword",
+                "value":      matched_kw,
+                "rule":       _KEYWORD_RULE.get(matched_kw, "INTERNAL"),
+                "confidence": 0.6,
+            }]
             policy = (
-                policy_resolver.resolve([])
+                policy_resolver.resolve(detections)
                 if policy_resolver
                 else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
             )
@@ -258,7 +289,7 @@ def _screenshot_loop(
                 except Exception:
                     pass
 
-        event_q.put_nowait((policy, source_tag, title, now, cleared, []))
+        event_q.put_nowait((policy, source_tag, title, now, cleared, detections))
 
     # Best-effort keyboard hook -- kept as a fast path in case it does fire in
     # some environment/Windows configuration; see module docstring for why it
@@ -296,6 +327,19 @@ def _screenshot_loop(
         if seq != last_seq:
             last_seq = seq
             if _clipboard_has_image():
+                # A single screenshot can bump the clipboard sequence number
+                # more than once in quick succession (the OS/capture tool
+                # writing the image in stages) -- without gating on the SAME
+                # cooldown _handle_detection already uses, that would spawn a
+                # second independent OCR+classify+incident cycle for what is
+                # really one screenshot. Snapshot the cooldown state BEFORE
+                # calling _handle_detection (which updates it as a side
+                # effect), so both the title-check and the OCR spawn agree on
+                # whether this is a genuinely new event.
+                now = time.monotonic()
+                with _cb_lock:
+                    already_handled_recently = now - _last_action[0] < _COOLDOWN_SECS
+
                 _handle_detection("CLIPBOARD_IMAGE")
 
                 # Thorough path: OCR the actual image content in the
@@ -304,7 +348,7 @@ def _screenshot_loop(
                 # content can change again before a background thread gets
                 # scheduled), hand the pixels off, and let the classify
                 # round-trip happen off the poll loop.
-                if _OCR_AVAILABLE:
+                if _OCR_AVAILABLE and not already_handled_recently:
                     try:
                         image = ImageGrab.grabclipboard()
                     except Exception as exc:

@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, AlertTriangle, Shield, Monitor,
-  BarChart3, Activity, Brain, LogOut, ShieldCheck,
+  BarChart3, Activity, Brain, LogOut, ShieldCheck, AppWindow,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -16,6 +16,7 @@ const NAV_GROUPS = [
       { to: '/incidents', label: 'Incidents', Icon: AlertTriangle },
       { to: '/policies',  label: 'Policies',  Icon: Shield },
       { to: '/ai-policy', label: 'AI Policy', Icon: Brain },
+      { to: '/app-rules', label: 'Restricted Apps', Icon: AppWindow },
     ],
   },
   {

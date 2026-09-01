@@ -29,6 +29,30 @@ async function seed() {
   });
   console.log(`  policy       : "${policy.name}"  (${policy.id})`);
 
+  // ── Restricted app rules (migrated from the agent's old hardcoded watchlist) ─
+  const APP_RULES = [
+    ['7zg', '7-Zip GUI'], ['7z', '7-Zip archiver'], ['winrar', 'WinRAR archiver'],
+    ['winzip', 'WinZip archiver'], ['peazip', 'PeaZip archiver'], ['bandizip', 'Bandizip archiver'],
+    ['teamviewer', 'TeamViewer remote access'], ['anydesk', 'AnyDesk remote access'],
+    ['chromeremotedesktop', 'Chrome Remote Desktop'], ['radmin', 'Radmin remote access'],
+    ['ammyy', 'Ammyy Admin'], ['logmein', 'LogMeIn remote access'], ['uvnc', 'UltraVNC'],
+    ['tigervnc', 'TigerVNC'], ['realvnc', 'RealVNC'], ['vncviewer', 'VNC Viewer'],
+    ['filezilla', 'FileZilla FTP'], ['winscp', 'WinSCP SFTP'], ['smartftp', 'SmartFTP'],
+    ['coreftp', 'CoreFTP'], ['ftp', 'FTP client'], ['megasync', 'MEGA cloud sync'],
+    ['ngrok', 'ngrok tunnel'], ['frpc', 'frp client tunnel'], ['putty', 'PuTTY SSH'],
+    ['kitty', 'KiTTY SSH'], ['plink', 'Plink SSH'], ['usbdeview', 'USB enumerator'],
+    ['diskpart', 'DiskPart disk utility'], ['obs64', 'OBS Studio recording'],
+    ['obs32', 'OBS Studio recording (32-bit)'], ['obs', 'OBS Studio'],
+    ['camtasia', 'Camtasia recording'], ['bandicam', 'Bandicam recording'],
+    ['fraps', 'FRAPS capture'], ['wireshark', 'Wireshark packet capture'],
+    ['rawcap', 'RawCap capture'], ['utorrent', 'uTorrent'], ['qbittorrent', 'qBittorrent'],
+    ['bittorrent', 'BitTorrent'], ['transmission', 'Transmission torrent'],
+  ];
+  for (const [keyword, label] of APP_RULES) {
+    await prisma.appRule.upsert({ where: { keyword }, update: {}, create: { keyword, label } });
+  }
+  console.log(`  app rules    : ${APP_RULES.length} restricted-app rules seeded`);
+
   // ── Seed agent ──────────────────────────────────────────────────────────────
   const agent = await prisma.agent.upsert({
     where:  { hostname: 'seed-workstation-01' },

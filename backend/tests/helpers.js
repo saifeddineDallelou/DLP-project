@@ -10,6 +10,7 @@ async function resetDb() {
   await prisma.behaviorEvent.deleteMany();
   await prisma.aiLeakAttempt.deleteMany();
   await prisma.userBehaviorBaseline.deleteMany();
+  await prisma.appRule.deleteMany();
   await prisma.agent.deleteMany();
   await prisma.policy.deleteMany();
   await prisma.user.deleteMany();

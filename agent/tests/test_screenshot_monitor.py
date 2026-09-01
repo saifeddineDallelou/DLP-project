@@ -6,7 +6,41 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import screenshot_monitor
-from screenshot_monitor import _is_sensitive
+from screenshot_monitor import _is_sensitive, _matched_keyword, _KEYWORD_RULE, _SENSITIVE_KEYWORDS, _SENSITIVE_FILENAME_KW
+
+
+class TestMatchedKeyword:
+    def test_returns_the_matched_keyword(self):
+        assert _matched_keyword("payroll_2026.xlsx - Excel") == "payroll"
+
+    def test_returns_none_for_ordinary_window(self):
+        assert _matched_keyword("Untitled - Notepad") is None
+
+    def test_returns_a_filename_keyword_for_office_file(self):
+        assert _matched_keyword("client_invoice.xlsx - Excel") in ("client", "invoice")
+
+    def test_is_sensitive_still_reflects_whether_a_keyword_matched(self):
+        assert _is_sensitive("payroll_2026.xlsx - Excel") is True
+        assert _is_sensitive("Untitled - Notepad") is False
+
+
+class TestKeywordRule:
+    def test_every_sensitive_keyword_has_a_compliance_rule(self):
+        for kw in _SENSITIVE_KEYWORDS | _SENSITIVE_FILENAME_KW:
+            assert kw in _KEYWORD_RULE, f"{kw!r} has no compliance rule mapping"
+
+    @pytest.mark.parametrize("keyword,expected_rule", [
+        ("ssn", "HIPAA"),
+        ("medical", "HIPAA"),
+        ("iban", "PCI-DSS"),
+        ("bank", "PCI-DSS"),
+        ("confidential", "INTERNAL"),
+        ("password", "INTERNAL"),
+        ("salary", "GDPR"),
+        ("client", "GDPR"),
+    ])
+    def test_maps_keyword_to_the_expected_rule(self, keyword, expected_rule):
+        assert _KEYWORD_RULE[keyword] == expected_rule
 
 
 class TestIsSensitive:

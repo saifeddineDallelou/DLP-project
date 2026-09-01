@@ -79,18 +79,36 @@ class DLPApiClient:
         content_sample: str | None,
         risk_score: float,
         blocked: bool = True,
+        policy_id: str | None = None,
     ) -> dict | None:
         return _request(
             "POST",
             f"{self.backend_url}/api/ai-policy/attempt",
             json={
                 "agentId":       agent_id,
+                "policyId":      policy_id,
                 "platform":      platform,
                 "method":        method,
                 "contentSample": content_sample,
                 "riskScore":     risk_score,
                 "blocked":       blocked,
             },
+            headers=self._agent_headers,
+        )
+
+    def request_review_ai_leak_attempt(self, attempt_id: str, note: str | None) -> dict | None:
+        return _request(
+            "PATCH",
+            f"{self.backend_url}/api/ai-policy/attempt/{attempt_id}/request-review",
+            json={"note": note},
+            headers=self._agent_headers,
+        )
+
+    def request_review_incident(self, incident_id: str, note: str | None) -> dict | None:
+        return _request(
+            "PATCH",
+            f"{self.backend_url}/api/incidents/{incident_id}/request-review",
+            json={"note": note},
             headers=self._agent_headers,
         )
 
@@ -117,6 +135,13 @@ class DLPApiClient:
         return _request(
             "GET",
             f"{self.backend_url}/api/policies",
+            headers=self._agent_headers,
+        )
+
+    def list_app_rules(self) -> list[dict] | None:
+        return _request(
+            "GET",
+            f"{self.backend_url}/api/app-rules",
             headers=self._agent_headers,
         )
 

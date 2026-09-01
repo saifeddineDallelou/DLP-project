@@ -1,4 +1,5 @@
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import main
@@ -21,6 +22,35 @@ class TestLoadSaveState:
         state_file.write_text("not valid json{{{")
         with patch.object(main, "_STATE_FILE", state_file):
             assert main._load_state() == {}
+
+
+class TestPolicyRefreshLoop:
+    def test_refreshes_periodically(self):
+        resolver = MagicMock()
+        stop = threading.Event()
+        resolver.refresh.side_effect = lambda: stop.set()  # stop after one refresh
+
+        main._policy_refresh_loop(resolver, 0, stop)
+
+        resolver.refresh.assert_called_once()
+
+    def test_does_not_refresh_if_already_stopped(self):
+        resolver = MagicMock()
+        stop = threading.Event()
+        stop.set()
+
+        main._policy_refresh_loop(resolver, 0, stop)
+
+        resolver.refresh.assert_not_called()
+
+    def test_does_not_refresh_if_stop_fires_during_the_wait(self):
+        resolver = MagicMock()
+        stop = threading.Event()
+        stop.wait = lambda timeout: (stop.set(), True)[1]  # stop mid-wait
+
+        main._policy_refresh_loop(resolver, 5, stop)
+
+        resolver.refresh.assert_not_called()
 
 
 class TestEnroll:

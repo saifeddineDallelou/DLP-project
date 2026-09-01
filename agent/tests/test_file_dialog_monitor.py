@@ -128,6 +128,37 @@ class TestDialogMonitorLoopActionBranching:
         mock_close.assert_called_once_with(111)
         _, kwargs = client.report_ai_leak_attempt.call_args
         assert kwargs["blocked"] is True
+        assert kwargs["policy_id"] == "p1"
+
+    def test_quarantine_action_closes_dialog_and_moves_the_file(self, tmp_path):
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        client = MagicMock()
+        client.classify.return_value = {"risk_score": 0.95, "detections": [{"type": "credit_card", "rule": "PCI-DSS"}]}
+        client.report_ai_leak_attempt.return_value = {"id": "leak-1"}
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "QUARANTINE", "name": "PCI-DSS"}
+
+        with patch("file_dialog_monitor.quarantine_file") as mock_quarantine:
+            mock_close = self._run_one_iteration(client, resolver, str(f))
+            mock_quarantine.assert_called_once_with(str(f))
+
+        mock_close.assert_called_once_with(111)
+        _, kwargs = client.report_ai_leak_attempt.call_args
+        assert kwargs["blocked"] is True
+
+    def test_block_action_does_not_touch_the_file(self, tmp_path):
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        client = MagicMock()
+        client.classify.return_value = {"risk_score": 0.95, "detections": [{"type": "credit_card", "rule": "PCI-DSS"}]}
+        client.report_ai_leak_attempt.return_value = {"id": "leak-1"}
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "BLOCK", "name": "PCI-DSS"}
+
+        with patch("file_dialog_monitor.quarantine_file") as mock_quarantine:
+            self._run_one_iteration(client, resolver, str(f))
+            mock_quarantine.assert_not_called()
 
     def test_allow_action_does_not_close_dialog_or_report(self, tmp_path):
         f = tmp_path / "card.txt"
