@@ -11,6 +11,7 @@ const {
   ZERO_BASELINE_FLOORS,
 } = require('../lib/ueba-scoring');
 const { recomputeBaseline } = require('../lib/baseline');
+const { toEvent, forwardAsync } = require('../lib/siem');
 
 const router = express.Router();
 
@@ -222,6 +223,14 @@ router.post('/events', async (req, res, next) => {
     const event = await prisma.behaviorEvent.create({
       data: { agentId, userId, eventType, metadata: metadata ?? {} },
     });
+
+    // Behaviour events carry no severity -- they are observations, not
+    // violations. Forwarded anyway because a SIEM correlating "large transfer
+    // at 02:00" against an incident an hour later is exactly the value of
+    // having both in one place.
+    forwardAsync(toEvent('BEHAVIOR_EVENT', event, {
+      raw: event.metadata ?? null,
+    }));
 
     res.status(201).json(event);
   } catch (err) {
