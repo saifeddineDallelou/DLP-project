@@ -34,15 +34,41 @@ async function refreshStaleBaselines({
   logger = console,
 } = {}) {
   const cutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000);
+  const windowStart = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
 
   const stale = await prisma.userBehaviorBaseline.findMany({
     where: { lastUpdated: { lt: cutoff } },
     select: { userId: true },
   });
 
-  const result = { checked: stale.length, refreshed: 0, skipped: 0, failed: 0 };
+  // Users the agent is reporting on who have no baseline at all yet. Without
+  // this the job only ever maintains baselines that already exist, so a newly
+  // monitored endpoint would sit unscored until an admin noticed and pressed
+  // Recompute -- which is exactly the manual step this job exists to remove.
+  const seen = await prisma.behaviorEvent.groupBy({
+    by: ['userId'],
+    where: { timestamp: { gte: windowStart } },
+    _count: { _all: true },
+  });
+  const existing = new Set(
+    (await prisma.userBehaviorBaseline.findMany({ select: { userId: true } }))
+      .map((b) => b.userId),
+  );
+  const unbaselined = seen
+    .map((s) => s.userId)
+    .filter((id) => !existing.has(id));
 
-  for (const { userId } of stale) {
+  const targets = [...stale.map((s) => s.userId), ...unbaselined];
+  const result = {
+    checked: targets.length,
+    created: 0,
+    refreshed: 0,
+    skipped: 0,
+    failed: 0,
+  };
+  const isNew = new Set(unbaselined);
+
+  for (const userId of targets) {
     try {
       const outcome = await recomputeBaseline({ userId, days: windowDays });
 
@@ -68,6 +94,10 @@ async function refreshStaleBaselines({
           metadata: {
             monitoredUserId: userId,
             source: 'SCHEDULED',
+            // Distinguishes a first baseline for a newly seen user from an
+            // update to an existing one -- an auditor reading the trail should
+            // not have to infer which happened.
+            reason: isNew.has(userId) ? 'BOOTSTRAP' : 'STALE',
             days: windowDays,
             eventCount: outcome.computedFrom.eventCount,
             avgDailyFiles: outcome.baseline.avgDailyFiles,
@@ -76,7 +106,8 @@ async function refreshStaleBaselines({
         },
       });
 
-      result.refreshed += 1;
+      if (isNew.has(userId)) result.created += 1;
+      else result.refreshed += 1;
     } catch (err) {
       // One bad user must not abort the pass for everyone else.
       result.failed += 1;
@@ -98,8 +129,8 @@ function startBaselineRefresh({
       const r = await refreshStaleBaselines({ staleHours, windowDays, logger });
       if (r.checked > 0) {
         logger.log(
-          `[baseline-refresh] checked=${r.checked} refreshed=${r.refreshed} ` +
-          `skipped=${r.skipped} failed=${r.failed}`,
+          `[baseline-refresh] checked=${r.checked} created=${r.created} ` +
+          `refreshed=${r.refreshed} skipped=${r.skipped} failed=${r.failed}`,
         );
       }
     } catch (err) {

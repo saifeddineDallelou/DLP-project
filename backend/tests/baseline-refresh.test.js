@@ -148,6 +148,67 @@ describe('refreshStaleBaselines', () => {
   });
 });
 
+describe('bootstrapping users with no baseline', () => {
+  // Without this the job only maintains baselines that already exist, so a
+  // newly monitored endpoint sits unscored until an admin notices -- which is
+  // the manual step the job exists to remove. It is also what made the
+  // Recompute button load-bearing.
+  test('creates a first baseline for a user who has events but none', async () => {
+    const agent = await createAgent();
+    await fileEvent(agent.id, 'brand-new-user', { count: 25, sizeMB: 250, hour: 10 });
+
+    const r = await refreshStaleBaselines({ staleHours: 24, logger: silent });
+
+    expect(r.created).toBe(1);
+    expect(r.refreshed).toBe(0);
+    const made = await prisma.userBehaviorBaseline.findUnique({ where: { userId: 'brand-new-user' } });
+    expect(made).not.toBeNull();
+    expect(made.avgDailyFiles).toBe(25);
+    expect(made.avgDailyVolumeMB).toBe(250);
+  });
+
+  test('marks a bootstrap distinctly from a stale refresh in the audit trail', async () => {
+    const agent = await createAgent();
+    await fileEvent(agent.id, 'new-user', { count: 5, sizeMB: 5, hour: 10 });
+    await baseline('old-user', { lastUpdated: hoursAgo(48) });
+    await fileEvent(agent.id, 'old-user', { count: 5, sizeMB: 5, hour: 10 });
+
+    await refreshStaleBaselines({ staleHours: 24, logger: silent });
+
+    const logs = await prisma.auditLog.findMany({ where: { action: 'RECOMPUTE_BEHAVIOR_BASELINE' } });
+    const reasons = Object.fromEntries(logs.map((l) => [l.metadata.monitoredUserId, l.metadata.reason]));
+    expect(reasons['new-user']).toBe('BOOTSTRAP');
+    expect(reasons['old-user']).toBe('STALE');
+  });
+
+  test('does not re-bootstrap a user whose baseline is simply fresh', async () => {
+    const agent = await createAgent();
+    await baseline('settled-user', { lastUpdated: new Date() });
+    await fileEvent(agent.id, 'settled-user', { count: 99, sizeMB: 99, hour: 10 });
+
+    const r = await refreshStaleBaselines({ staleHours: 24, logger: silent });
+
+    expect(r.checked).toBe(0);
+    expect(r.created).toBe(0);
+  });
+
+  test('ignores events older than the window when bootstrapping', async () => {
+    const agent = await createAgent();
+    await prisma.behaviorEvent.create({
+      data: {
+        agentId: agent.id, userId: 'long-gone', eventType: 'FILE_ACCESS',
+        metadata: { count: 5, sizeMB: 5, hour: 10 },
+        timestamp: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const r = await refreshStaleBaselines({ staleHours: 24, windowDays: 30, logger: silent });
+
+    expect(r.created).toBe(0);
+    expect(await prisma.userBehaviorBaseline.findUnique({ where: { userId: 'long-gone' } })).toBeNull();
+  });
+});
+
 describe('defaults', () => {
   test('are sane for a background job', () => {
     expect(DEFAULT_STALE_HOURS).toBe(24);

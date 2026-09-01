@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Activity, RefreshCw, TrendingUp, User, Calculator, ShieldAlert } from 'lucide-react';
+import { Activity, RefreshCw, TrendingUp, User, ShieldAlert } from 'lucide-react';
 import api from '../services/api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -68,7 +68,7 @@ function ComponentRow({ metricKey, c }) {
   );
 }
 
-function RiskProfileCard({ profile, onRecompute, recomputing }) {
+function RiskProfileCard({ profile }) {
   const tone = RISK_LEVEL_TONES[profile.riskLevel] ?? RISK_LEVEL_TONES.LOW;
   const hasBreakdown = profile.components && Object.keys(profile.components).length > 0;
   return (
@@ -177,14 +177,17 @@ function RiskProfileCard({ profile, onRecompute, recomputing }) {
         </div>
       )}
 
-      <button
-        className="btn-secondary text-[11px] w-full mt-3 py-1.5"
-        disabled={recomputing}
-        onClick={() => onRecompute(profile.userId)}
-        title="Rebuild this user's normal (median files/volume/USB per active day, 10th-90th percentile working hours) from their actual event history"
-      >
-        <Calculator size={12} /> {recomputing ? 'Recomputing…' : 'Recompute baseline from history'}
-      </button>
+      {/* The Recompute button that used to live here is gone. Baselines are
+          maintained by the hourly refresh job -- which now also bootstraps a
+          baseline for any newly seen user, the one case that still needed a
+          human. A button whose only remaining function is "do it slightly
+          sooner" is noise on a card meant to be scanned. The endpoint itself
+          stays for API callers and for forcing a specific window. */}
+      {profile.baseline?.lastUpdated && (
+        <p className="text-[10px] text-ink-faint mt-3 pt-2 border-t border-border">
+          Baseline updated {formatDate(profile.baseline.lastUpdated)} · refreshes automatically
+        </p>
+      )}
     </div>
   );
 }
@@ -196,7 +199,6 @@ export default function UEBA() {
   const [loading, setLoading]   = useState(true);
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [filter, setFilter]     = useState('');
-  const [recomputingId, setRecomputingId] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -228,18 +230,6 @@ export default function UEBA() {
 
   useEffect(() => { load(); }, [load]);
 
-  const recompute = async (userId) => {
-    setRecomputingId(userId);
-    try {
-      await api.post(`/api/ueba/baseline/${userId}/recompute`);
-      await load();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setRecomputingId(null);
-    }
-  };
-
   const displayed = filter
     ? events.filter(e => e.eventType === filter || e.userId?.includes(filter))
     : events;
@@ -268,12 +258,7 @@ export default function UEBA() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {profiles.map((p) => (
-              <RiskProfileCard
-                key={p.userId}
-                profile={p}
-                onRecompute={recompute}
-                recomputing={recomputingId === p.userId}
-              />
+              <RiskProfileCard key={p.userId} profile={p} />
             ))}
           </div>
         )}
