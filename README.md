@@ -140,6 +140,7 @@ docstring explaining the vector it covers and its known gaps.
 | `agent_state.py` | Thread-safe state shared across all monitors |
 | `file_extractor.py` | Text extraction from PDF, DOCX, XLSX, PPTX and plain formats |
 | `ueba_collector.py` | Periodic behaviour-event flush |
+| `discovery.py` | Data-at-rest scanner — walks a tree, reports sensitive files. Read-only |
 
 ```bash
 cd agent
@@ -148,6 +149,19 @@ cp .env.example .env                           # then edit WATCH_DIRS
 python src/main.py
 python -m pytest -q                            # 275 tests
 ```
+
+**Data-at-rest discovery.** Every monitor above reacts to *activity*. None of
+them see sensitive data already sitting on a share. `discovery.py` fills that
+gap by walking a tree and calling the same `classify()` the live watcher calls
+— no new detection logic, just a different harness:
+
+```bash
+python src/discovery.py C:/shared --max-files 5000
+python src/discovery.py C:/shared --include "*.pdf" "*.docx" --json
+```
+
+Read-only by design: it finds and reports, never blocks or moves anything.
+Exits non-zero when it finds something, so it can gate a scheduled task.
 
 > Windows-only. It depends on Win32 window APIs and clipboard formats.
 > The screenshot monitor polls the clipboard rather than hooking the keyboard,

@@ -127,6 +127,30 @@ opens an AI platform within 30 seconds.
 
 ---
 
+## 3a. Data at rest
+
+Everything in §3 is triggered by *activity*. None of it can see sensitive data
+that has been sitting on a share for two years — a separate DLP pillar
+(Forcepoint calls it Discovery, Purview ships an on-prem scanner, and the
+standalone category is sold as DSPM).
+
+`agent/src/discovery.py` fills it without new detection logic: walk a tree,
+call the same `classify()` the live watcher calls, report what is found. That
+reuse is the point — nothing here decides what is sensitive, so there is no
+second opinion to keep in sync with the classifier.
+
+It is **read-only** by deliberate choice. A crawler with write authority over a
+file share is a very different risk to sign off on, and remediating findings it
+cannot see the context of would be reckless. Auto-remediation is a real feature
+of commercial products and a stated non-goal here.
+
+It also serves a second purpose that only became apparent once it existed:
+running the classifier over a large corpus of *ordinary* text is the only way
+to measure its false-positive rate. The live monitors classify small fragments
+that are already suspicious, so a loose pattern never shows up. The first full
+scan of this repository reported the README as cardholder data — see the
+SWIFT/BIC fix in `classifier/src/engine.py`.
+
 ## 4. The agent's threading model
 
 `main.py` starts every monitor as a daemon thread over one shared `AgentState`,

@@ -5,6 +5,9 @@ Run from classifier/: pytest -v
 
 import sys
 import os
+
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.engine import classify_text, _luhn_check
@@ -213,3 +216,64 @@ def test_empty_input():
     result = classify_text(None, None)
     assert result["sensitive"] is False
     assert result["risk_score"] == 0.0
+
+
+class TestSwiftBicPrecision:
+    """
+    The BIC regex is "eight uppercase characters", which matched ordinary
+    English words -- INTERNAL, PASSWORD, KEYWORDS, REDACTED, STRATEGY,
+    BLOCKING -- and reported every one as a PCI-DSS finding.
+
+    Found by running the discovery scanner over this project's own source.
+    The live monitors never surfaced it because they classify small,
+    already-suspicious fragments; only a walk over a large ordinary corpus
+    exposes a precision problem like this.
+    """
+
+    def _bics(self, text):
+        result = classify_text(text, None)
+        return [d for d in result["detections"] if d["type"] == "swift_bic"]
+
+    @pytest.mark.parametrize("word", [
+        "INTERNAL", "PASSWORD", "KEYWORDS", "REDACTED",
+        "STRATEGY", "BLOCKING", "DETECTED", "SPLITTER",
+    ])
+    def test_an_ordinary_uppercase_word_is_not_a_bank_code(self, word):
+        assert self._bics(word) == []
+
+    def test_a_whole_line_of_such_words_produces_nothing(self):
+        text = "INTERNAL KEYWORDS PATTERNS REDACTED BLOCKING STRATEGY PASSWORD"
+        assert self._bics(text) == []
+
+    def test_a_real_bic_near_banking_language_is_still_detected(self):
+        text = "Please wire to beneficiary bank DEUTDEFF, IBAN DE89370400440532013000"
+        assert len(self._bics(text)) == 1
+
+    def test_an_eleven_character_bic_is_detected(self):
+        assert len(self._bics("SWIFT code: DEUTDEFF500 for the transfer")) == 1
+
+    def test_the_country_code_must_be_a_real_one(self):
+        # Characters 5-6 of a BIC are an ISO 3166-1 alpha-2 country code.
+        # "INTERNAL" has "RN", which is not a country.
+        assert self._bics("Our SWIFT reference is INTERNAL for this bank") == []
+
+    def test_a_bare_bic_with_no_context_is_not_reported(self):
+        # An eight-letter token with nothing around it is genuinely
+        # ambiguous. Reporting it is what produced the false positives;
+        # commercial products require the same supporting evidence.
+        assert self._bics("DEUTDEFF") == []
+
+    def test_the_reported_value_is_masked(self):
+        hits = self._bics("beneficiary bank DEUTDEFF for the wire transfer")
+        assert hits
+        assert "DEUT" not in hits[0]["value"]
+
+    def test_source_code_does_not_register_as_cardholder_data(self):
+        # The concrete regression: a Python file mentioning INTERNAL and
+        # PASSWORD scored as a PCI-DSS finding.
+        source = (
+            "POLICY_ACTIONS = ['ALLOW', 'ALERT', 'BLOCK']\n"
+            "RULE_INTERNAL = 'INTERNAL'\n"
+            "FIELD_PASSWORD = 'PASSWORD'\n"
+        )
+        assert self._bics(source) == []
