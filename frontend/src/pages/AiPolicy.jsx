@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Brain, RefreshCw, ShieldX, ShieldCheck } from 'lucide-react';
+import { Brain, RefreshCw, ShieldX, ShieldCheck, Flag } from 'lucide-react';
 import api from '../services/api.js';
+import Modal from '../components/Modal.jsx';
 import PageHeader from '../components/PageHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
 import Badge from '../components/Badge.jsx';
@@ -16,6 +17,9 @@ export default function AiPolicy() {
   const [total, setTotal]       = useState(0);
   const [loading, setLoading]   = useState(true);
   const [filter, setFilter]     = useState('');
+  const [selected, setSelected] = useState(null);
+  const [adminNoteDraft, setAdminNoteDraft] = useState('');
+  const [updating, setUpdating] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -31,6 +35,22 @@ export default function AiPolicy() {
 
   const blocked   = attempts.filter(a => a.blocked).length;
   const displayed = filter ? attempts.filter(a => a.platform === filter) : attempts;
+
+  const openDetail = (att) => {
+    setSelected(att);
+    setAdminNoteDraft(att.adminNote ?? '');
+  };
+
+  const saveAdminNote = async () => {
+    if (!selected) return;
+    setUpdating(true);
+    try {
+      const { data } = await api.patch(`/api/ai-policy/attempt/${selected.id}`, { adminNote: adminNoteDraft });
+      setSelected((s) => ({ ...s, ...data }));
+      setAttempts((prev) => prev.map((a) => (a.id === selected.id ? { ...a, ...data } : a)));
+    } catch (e) { console.error(e); }
+    finally { setUpdating(false); }
+  };
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -62,24 +82,35 @@ export default function AiPolicy() {
               <th className="th">Risk</th>
               <th className="th">Blocked</th>
               <th className="th">Agent</th>
+              <th className="th">Policy</th>
               <th className="th">Content Sample</th>
               <th className="th">Time</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="text-center py-16"><Spinner /></td></tr>
+              <tr><td colSpan={8} className="text-center py-16"><Spinner /></td></tr>
             ) : displayed.length === 0 ? (
-              <tr><td colSpan={7}><EmptyState icon={Brain} title="No AI leak attempts detected" /></td></tr>
+              <tr><td colSpan={8}><EmptyState icon={Brain} title="No AI leak attempts detected" /></td></tr>
             ) : displayed.map((att) => (
-              <tr key={att.id} className="table-row cursor-default">
+              <tr key={att.id} className="table-row" onClick={() => openDetail(att)}>
                 <td className="td">
                   <span className="chip !text-[11px]">{PLATFORM_LABELS[att.platform] ?? att.platform}</span>
                 </td>
                 <td className="td text-xs text-ink-faint">{att.method}</td>
                 <td className="td"><RiskBar score={att.riskScore} /></td>
-                <td className="td"><Badge tone="blocked" value={att.blocked} label={att.blocked ? 'Blocked' : 'Allowed'} size="sm" /></td>
+                <td className="td">
+                  <div className="flex items-center gap-1.5">
+                    <Badge tone="blocked" value={att.blocked} label={att.blocked ? 'Blocked' : 'Allowed'} size="sm" />
+                    {att.reviewRequested && (
+                      <span title="Worker flagged this for review" className="text-severity-medium-text">
+                        <Flag size={12} />
+                      </span>
+                    )}
+                  </div>
+                </td>
                 <td className="td font-mono text-xs text-ink-faint">{att.agent?.hostname ?? '—'}</td>
+                <td className="td text-xs text-ink-faint truncate max-w-[140px]">{att.policy?.name ?? '—'}</td>
                 <td className="td">
                   <span className="text-[11px] text-ink-faint font-mono max-w-[180px] block truncate">
                     {att.contentSample ?? '—'}
@@ -91,6 +122,62 @@ export default function AiPolicy() {
           </tbody>
         </table>
       </div>
+
+      <Modal open={!!selected} onClose={() => setSelected(null)} title="AI Leak Attempt Detail" maxWidth="max-w-xl">
+        {selected && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="chip">{PLATFORM_LABELS[selected.platform] ?? selected.platform}</span>
+              <Badge tone="blocked" value={selected.blocked} label={selected.blocked ? 'Blocked' : 'Allowed'} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              {[
+                ['Method',      selected.method],
+                ['Risk Score',  selected.riskScore != null ? `${(selected.riskScore * 100).toFixed(0)}%` : '—'],
+                ['Agent',       selected.agent?.hostname ?? '—'],
+                ['Policy',      selected.policy?.name ?? '—'],
+                ['Content Sample', selected.contentSample ?? '—'],
+                ['Time',        formatDate(selected.timestamp)],
+              ].map(([k, v]) => (
+                <div key={k} className="bg-surface-elevated border border-border rounded-lg p-3">
+                  <p className="text-[10px] font-semibold text-ink-faint uppercase tracking-wider mb-0.5">{k}</p>
+                  <p className="text-ink text-xs break-all">{v}</p>
+                </div>
+              ))}
+            </div>
+
+            {selected.reviewRequested && (
+              <div className="bg-severity-medium-soft border border-severity-medium/25 rounded-lg p-3">
+                <p className="text-[10px] font-semibold text-severity-medium-text uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <Flag size={11} /> Worker flagged this for review
+                </p>
+                <p className="text-xs text-ink break-words">
+                  {selected.justification || <span className="text-ink-faint italic">No note left</span>}
+                </p>
+              </div>
+            )}
+
+            <div>
+              <p className="label mb-1.5">Admin note</p>
+              <textarea
+                className="input w-full text-xs resize-none"
+                rows={3}
+                placeholder="Record what you found and the disposition..."
+                value={adminNoteDraft}
+                onChange={(e) => setAdminNoteDraft(e.target.value)}
+              />
+              <button
+                className="btn-secondary text-xs mt-2"
+                disabled={updating || adminNoteDraft === (selected.adminNote ?? '')}
+                onClick={saveAdminNote}
+              >
+                Save note
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

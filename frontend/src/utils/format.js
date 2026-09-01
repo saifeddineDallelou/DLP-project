@@ -99,6 +99,7 @@ export const EVENT_TYPE_LABELS = {
   SCREENSHOT:         'Screenshot',
   APP_LAUNCH:         'App launch',
   AFTER_HOURS_ACCESS: 'After-hours access',
+  LARGE_FILE_TRANSFER: 'Large file transfer',
 };
 
 export const PLATFORM_LABELS = {

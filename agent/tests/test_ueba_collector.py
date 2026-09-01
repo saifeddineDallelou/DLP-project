@@ -65,6 +65,32 @@ class TestUebaLoop:
         _, kwargs = client.post_ueba_event.call_args
         assert kwargs["event_type"] == "AFTER_HOURS_ACCESS"
 
+    def test_file_access_event_carries_total_bytes_as_mb(self):
+        client = MagicMock()
+        client.post_ueba_event.return_value = {"id": "e1"}
+        state = AgentState()
+        state.increment_file_access(size_bytes=5 * 1024 * 1024)   # 5 MB
+        state.increment_file_access(size_bytes=3 * 1024 * 1024)   # 3 MB
+
+        _run_one_iteration(client, state, fake_hour=14)
+
+        _, kwargs = client.post_ueba_event.call_args
+        assert kwargs["metadata"]["sizeMB"] == 8.0
+
+    def test_after_hours_threshold_is_configurable(self):
+        # 17:00 (5 PM) should count as after-hours once AFTER_HOURS_START is
+        # lowered from the 19 (7 PM) default -- e.g. AFTER_HOURS_START=17.
+        client = MagicMock()
+        client.post_ueba_event.return_value = {"id": "e1"}
+        state = AgentState()
+        state.increment_file_access()
+
+        with patch("ueba_collector._AFTER_HOURS_START", 17):
+            _run_one_iteration(client, state, fake_hour=17)
+
+        _, kwargs = client.post_ueba_event.call_args
+        assert kwargs["event_type"] == "AFTER_HOURS_ACCESS"
+
     def test_no_events_posted_when_counters_are_zero(self):
         client = MagicMock()
         state = AgentState()

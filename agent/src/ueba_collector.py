@@ -7,8 +7,8 @@ from api_client import DLPApiClient
 from agent_state import AgentState
 
 _COLLECT_INTERVAL = 60.0  # seconds between UEBA event flushes
-_AFTER_HOURS_START = 19   # 7 PM
-_AFTER_HOURS_END   = 7    # 7 AM
+_AFTER_HOURS_START = int(os.getenv("AFTER_HOURS_START", "19"))  # default 7 PM
+_AFTER_HOURS_END   = int(os.getenv("AFTER_HOURS_END", "7"))     # default 7 AM
 
 
 def _get_os_user() -> str:
@@ -33,6 +33,7 @@ def _ueba_loop(
             break
 
         file_count, clip_count = state.pop_counters()
+        file_bytes = state.pop_file_bytes()
         hour = datetime.now().hour
         is_after_hours = (hour >= _AFTER_HOURS_START) or (hour < _AFTER_HOURS_END)
 
@@ -44,6 +45,7 @@ def _ueba_loop(
                 event_type=event_type,
                 metadata={
                     "count": file_count,
+                    "sizeMB": round(file_bytes / (1024 * 1024), 2),
                     "hour": hour,
                     "note": "after-hours file activity detected" if is_after_hours
                             else "file access activity detected",

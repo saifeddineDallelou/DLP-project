@@ -15,7 +15,6 @@ router.get('/baseline', authenticate, async (req, res, next) => {
 
     const baseline = await prisma.userBehaviorBaseline.findUnique({
       where: { userId: targetId },
-      include: { user: { select: { id: true, email: true, role: true } } },
     });
 
     if (!baseline) return res.status(404).json({ error: 'No baseline found for this user' });
@@ -67,7 +66,86 @@ router.post('/baseline', authenticate, requireRole('ADMIN', 'ANALYST'), async (r
 
     res.status(201).json(baseline);
   } catch (err) {
-    if (err.code === 'P2003') return res.status(404).json({ error: 'User not found' });
+    next(err);
+  }
+});
+
+// POST /api/ueba/baseline/:userId/recompute?days=30 — compute a baseline
+// from this user's actual BehaviorEvent history instead of accepting
+// arbitrary values in the request body (that's what POST /baseline is for --
+// this endpoint replaces the numbers with ones derived from real behavior).
+router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    const days = Math.max(1, Number(req.query.days) || 30);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const events = await prisma.behaviorEvent.findMany({
+      where: { userId, timestamp: { gte: since } },
+      select: { eventType: true, metadata: true },
+    });
+
+    if (events.length === 0) {
+      return res.status(404).json({
+        error: `No behavior events recorded for this user in the last ${days} day(s) -- nothing to compute a baseline from`,
+      });
+    }
+
+    let totalFiles = 0;
+    let totalVolumeMB = 0;
+    let usbInserts = 0;
+    let largeFileTransfers = 0;
+    const hours = [];
+
+    for (const e of events) {
+      if (e.eventType === 'FILE_ACCESS' || e.eventType === 'AFTER_HOURS_ACCESS') {
+        totalFiles += Number(e.metadata?.count) || 0;
+        totalVolumeMB += Number(e.metadata?.sizeMB) || 0;
+        if (typeof e.metadata?.hour === 'number') hours.push(e.metadata.hour);
+      } else if (e.eventType === 'USB_INSERT') {
+        usbInserts += 1;
+      } else if (e.eventType === 'LARGE_FILE_TRANSFER') {
+        // Its own event, on top of (not part of) FILE_ACCESS/
+        // AFTER_HOURS_ACCESS -- a file over the large-file threshold is
+        // excluded from the routine content-scan path entirely (see
+        // agent/src/file_watcher.py), so its volume is never double-counted.
+        totalVolumeMB += Number(e.metadata?.sizeMB) || 0;
+        largeFileTransfers += 1;
+      }
+    }
+
+    hours.sort((a, b) => a - b);
+    // 10th/90th percentile rather than min/max -- a couple of one-off late
+    // nights shouldn't redefine this user's whole "working hours" baseline.
+    const percentile = (p) => hours.length ? hours[Math.floor(p * (hours.length - 1))] : null;
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    const existing = await prisma.userBehaviorBaseline.findUnique({ where: { userId } });
+
+    const baseline = await prisma.userBehaviorBaseline.upsert({
+      where: { userId },
+      update: {
+        avgDailyFiles: round2(totalFiles / days),
+        avgDailyVolumeMB: round2(totalVolumeMB / days),
+        avgWorkingHourStart: percentile(0.1) ?? existing?.avgWorkingHourStart ?? 9,
+        avgWorkingHourEnd: percentile(0.9) ?? existing?.avgWorkingHourEnd ?? 18,
+        avgUsbFrequency: round2(usbInserts / days),
+        lastUpdated: new Date(),
+      },
+      create: {
+        userId,
+        avgDailyFiles: round2(totalFiles / days),
+        avgDailyVolumeMB: round2(totalVolumeMB / days),
+        avgWorkingHourStart: percentile(0.1) ?? 9,
+        avgWorkingHourEnd: percentile(0.9) ?? 18,
+        avgUsbFrequency: round2(usbInserts / days),
+        riskScore: 0,
+        lastUpdated: new Date(),
+      },
+    });
+
+    res.json({ ...baseline, computedFrom: { eventCount: events.length, days, largeFileTransfers } });
+  } catch (err) {
     next(err);
   }
 });
@@ -154,14 +232,18 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
 
     // Count anomalous events in the last 24 h
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const [afterHours, usbInserts, total24h] = await prisma.$transaction([
+    const [afterHours, usbInserts, largeFileTransfers, total24h] = await prisma.$transaction([
       prisma.behaviorEvent.count({ where: { userId, eventType: 'AFTER_HOURS_ACCESS', timestamp: { gte: since } } }),
       prisma.behaviorEvent.count({ where: { userId, eventType: 'USB_INSERT', timestamp: { gte: since } } }),
+      prisma.behaviorEvent.count({ where: { userId, eventType: 'LARGE_FILE_TRANSFER', timestamp: { gte: since } } }),
       prisma.behaviorEvent.count({ where: { userId, timestamp: { gte: since } } }),
     ]);
 
     const baseScore  = baseline?.riskScore ?? 0;
-    const liveScore  = Math.min(baseScore + afterHours * 0.1 + usbInserts * 0.05, 1.0);
+    const liveScore  = Math.min(
+      baseScore + afterHours * 0.1 + usbInserts * 0.05 + largeFileTransfers * 0.15,
+      1.0,
+    );
     const level      = liveScore >= 0.7 ? 'HIGH' : liveScore >= 0.4 ? 'MEDIUM' : 'LOW';
 
     res.json({
@@ -169,8 +251,16 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       baselineRiskScore: baseScore,
       liveRiskScore: parseFloat(liveScore.toFixed(3)),
       riskLevel: level,
-      last24h: { total: total24h, afterHoursAccess: afterHours, usbInserts },
+      last24h: { total: total24h, afterHoursAccess: afterHours, usbInserts, largeFileTransfers },
       baselineExists: !!baseline,
+      baseline: baseline ? {
+        avgDailyFiles: baseline.avgDailyFiles,
+        avgDailyVolumeMB: baseline.avgDailyVolumeMB,
+        avgWorkingHourStart: baseline.avgWorkingHourStart,
+        avgWorkingHourEnd: baseline.avgWorkingHourEnd,
+        avgUsbFrequency: baseline.avgUsbFrequency,
+        lastUpdated: baseline.lastUpdated,
+      } : null,
     });
   } catch (err) {
     next(err);
