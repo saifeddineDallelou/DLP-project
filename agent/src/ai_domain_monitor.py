@@ -196,18 +196,27 @@ def _detect_platform_via_address_bar(hwnd: int) -> str | None:
     return None
 
 
-def _get_foreground_title() -> str:
+def _get_foreground_window() -> tuple[int, str]:
+    """Foreground window handle and title. The handle matters as well as the
+    title: a browser tab whose page has renamed itself needs the address-bar
+    check, and that needs an hwnd."""
     try:
         user32 = ctypes.windll.user32
         hwnd   = user32.GetForegroundWindow()
+        if not hwnd:
+            return 0, ""
         length = user32.GetWindowTextLengthW(hwnd)
         if length == 0:
-            return ""
+            return hwnd, ""
         buf = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buf, length + 1)
-        return buf.value
+        return hwnd, buf.value
     except Exception:
-        return ""
+        return 0, ""
+
+
+def _get_foreground_title() -> str:
+    return _get_foreground_window()[1]
 
 
 def _detect_platform_in_text(text: str) -> str | None:
@@ -312,6 +321,38 @@ class AiBlocker:
              app with no matching window title at all.
         """
         windows = _enum_all_windows()
+
+        # The FOREGROUND window first, when it is itself an AI platform.
+        #
+        # Scanning every window (below) is deliberate -- an AI tab sitting in
+        # the background is still a live paste target, so the block should
+        # fire either way. But the platform NAME ends up on the incident, and
+        # the loop below returns whichever matching window EnumWindows happens
+        # to hand back first, which is not necessarily the one the user is
+        # actually in. Observed live: a paste into a focused ChatGPT tab was
+        # recorded as ANTHROPIC_CLAUDE, because an always-open Claude Code
+        # terminal matched earlier in the enumeration.
+        #
+        # Blocking is unchanged. This only makes the attribution honest, and
+        # an incident naming the wrong platform is worse than useless to
+        # whoever investigates it.
+        fg_hwnd, fg_title = _get_foreground_window()
+        if fg_title:
+            fg_plat = _detect_platform_in_text(fg_title)
+            if fg_plat:
+                return fg_plat, f"foreground='{fg_title[:80]}'"
+
+            # ChatGPT renames its tab to the conversation topic as soon as you
+            # start chatting, so the focused tab's TITLE frequently matches
+            # nothing -- which is what let a background Claude Code window win
+            # the attribution. Check the focused browser's address bar before
+            # falling back to other windows. Uncached on purpose: this is the
+            # one window whose identity has to be correct right now, and it is
+            # a single UIA call rather than a walk over every window.
+            if _is_browser_window(fg_title):
+                fg_url_plat = _detect_platform_via_address_bar(fg_hwnd)
+                if fg_url_plat:
+                    return fg_url_plat, f"foreground-url='{fg_title[:80]}'"
 
         for _hwnd, title in windows:
             plat = _detect_platform_in_text(title)

@@ -10,6 +10,14 @@ import { formatDate } from '../utils/format.js';
 const EMPTY_FILTERS = { resource: '', action: '', from: '', to: '' };
 const PAGE_SIZE = 25;
 
+// An audit row with no actor means one of two different things, and they must
+// not look alike: the system wrote it (a scheduled job, which records no user
+// on purpose), or the account that wrote it has since been deleted. Every
+// automated writer stamps metadata.source, so that is what separates them --
+// any future one must do the same or it will read as a deleted account.
+const SYSTEM_SOURCES = new Set(['SCHEDULED']);
+const isSystemAction = (log) => SYSTEM_SOURCES.has(log?.metadata?.source);
+
 // Read-only by design: there is no create/edit/delete here, because audit rows
 // are only ever written as a side effect of the action they record. A trail an
 // operator can edit is not evidence of anything.
@@ -166,11 +174,20 @@ export default function Audit() {
                             <div className="text-ink">{log.user.email}</div>
                             <div className="text-[10px] text-ink-faint">{log.user.role}</div>
                           </div>
+                        ) : isSystemAction(log) ? (
+                          // A null actor is deliberate for automated writes --
+                          // that is how a scheduled job is told apart from an
+                          // admin doing the same thing by hand. Rendering it as
+                          // "deleted user" implied an account had vanished.
+                          <div>
+                            <div className="text-accent-text">System</div>
+                            <div className="text-[10px] text-ink-faint">automated</div>
+                          </div>
                         ) : (
-                          // The FK is nullable, so a row survives the deletion
+                          // The FK is nullable, so a row also survives deletion
                           // of the account that created it. Losing the actor is
                           // better than losing the record of the action.
-                          <span className="text-ink-faint italic">deleted user</span>
+                          <span className="text-ink-faint italic">deleted account</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -237,7 +254,10 @@ export default function Audit() {
           <div className="space-y-3 text-sm">
             <div className="grid grid-cols-2 gap-3">
               <Field label="When" value={formatDate(detail.createdAt)} />
-              <Field label="Who" value={detail.user?.email ?? 'deleted user'} />
+              <Field
+                label="Who"
+                value={detail.user?.email ?? (isSystemAction(detail) ? 'System (automated)' : 'deleted account')}
+              />
               <Field label="Resource" value={detail.resource} />
               <Field label="Resource ID" value={detail.resourceId ?? '—'} mono />
               <Field label="IP address" value={detail.ipAddress ?? '—'} mono />

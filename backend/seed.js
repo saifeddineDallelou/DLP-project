@@ -68,11 +68,18 @@ async function seed() {
   console.log(`  seed agent   : ${agent.hostname}  (${agent.id})`);
 
   // ── Behavior baseline for admin ─────────────────────────────────────────────
+  // Keyed by the OS username 'admin', matching what the seeded BehaviorEvents
+  // below report -- NOT by admin.id. UserBehaviorBaseline.userId identifies the
+  // monitored person as the agent names them, which is a different identity
+  // space from a dashboard User row (see the note on the model). Keying this by
+  // the User UUID produced a baseline that matched no events and rendered as a
+  // card labelled with a raw UUID.
   const baseline = await prisma.userBehaviorBaseline.upsert({
-    where:  { userId: admin.id },
+    where:  { userId: 'admin' },
     update: {},
     create: {
-      userId:               admin.id,
+      userId:               'admin',
+      department:           'Engineering',
       avgDailyFiles:        120,
       avgDailyVolumeMB:     45.5,
       avgWorkingHourStart:  8,
@@ -83,6 +90,79 @@ async function seed() {
     },
   });
   console.log(`  baseline     : riskScore=${baseline.riskScore}  user=${admin.email}`);
+
+  // ── Monitored people ────────────────────────────────────────────────────────
+  // These are OS usernames as the agent reports them, NOT dashboard User rows --
+  // BehaviorEvent.userId is a free string for exactly this reason (a SOC analyst
+  // with a login and the employees they monitor are different populations).
+  //
+  // They are seeded as EVENTS rather than as ready-made baselines, for two
+  // reasons: the UEBA page builds its cards from users who have events, so a
+  // bare baseline never appears on screen; and letting the refresh job derive
+  // the baselines is the honest demonstration -- the numbers on the page are
+  // then computed from behaviour, not typed into a seed file.
+  //
+  // Peer-relative scoring needs at least two OTHER members of a department for
+  // a median worth comparing against, hence three per group.
+  const people = [
+    { user: 'j.rivera', dept: 'Engineering', filesPerDay: 130, mbPerDay: 55,   hour: 10 },
+    { user: 's.okafor', dept: 'Engineering', filesPerDay: 95,  mbPerDay: 38,   hour: 11 },
+    { user: 'a.hassan', dept: 'Engineering', filesPerDay: 150, mbPerDay: 70,   hour: 9  },
+    { user: 'l.chen',   dept: 'Finance',     filesPerDay: 22,  mbPerDay: 8,    hour: 9  },
+    { user: 'd.moreau', dept: 'Finance',     filesPerDay: 18,  mbPerDay: 11,   hour: 10 },
+    // Finance, but moving two orders of magnitude more than the rest of Finance.
+    // This is the card a demo should open on: unremarkable in isolation, obvious
+    // the moment it is placed next to its peer group.
+    { user: 'k.novak',  dept: 'Finance',     filesPerDay: 240, mbPerDay: 3200, hour: 2  },
+  ];
+
+  let eventCount = 0;
+  for (const p of people) {
+    // Ten working days of history, so the median has something to sit in the
+    // middle of and the 10th/90th-percentile hours are meaningful.
+    for (let d = 0; d < 10; d++) {
+      const jitter = 0.85 + ((d * 7) % 10) / 30;   // deterministic, not random
+      await prisma.behaviorEvent.upsert({
+        where:  { id: `seed-ev-${p.user}-${d}` },
+        update: {},
+        create: {
+          id:        `seed-ev-${p.user}-${d}`,
+          agentId:   agent.id,
+          userId:    p.user,
+          eventType: p.hour >= 19 || p.hour <= 6 ? 'AFTER_HOURS_ACCESS' : 'FILE_ACCESS',
+          metadata:  {
+            count:  Math.round(p.filesPerDay * jitter),
+            sizeMB: Math.round(p.mbPerDay * jitter),
+            hour:   p.hour,
+          },
+          timestamp: new Date(Date.now() - d * 24 * 60 * 60 * 1000),
+        },
+      });
+      eventCount++;
+    }
+
+    // Department is admin-declared -- the agent reports a username and has no
+    // idea what team anyone is on -- so it is seeded here. The numbers are not:
+    // the refresh job derives those from the events above.
+    await prisma.userBehaviorBaseline.upsert({
+      where:  { userId: p.user },
+      update: { department: p.dept },
+      create: {
+        userId:              p.user,
+        department:          p.dept,
+        avgDailyFiles:       0,
+        avgDailyVolumeMB:    0,
+        avgWorkingHourStart: 9,
+        avgWorkingHourEnd:   18,
+        avgUsbFrequency:     0,
+        riskScore:           0,
+        // Backdated so the refresh job treats it as stale and computes the real
+        // numbers on the next pass, which is at API boot.
+        lastUpdated:         new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+      },
+    });
+  }
+  console.log(`  people       : ${people.length} monitored users, ${eventCount} events, Engineering / Finance`);
 
   // ── Behavior events ─────────────────────────────────────────────────────────
   const event1 = await prisma.behaviorEvent.upsert({

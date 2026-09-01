@@ -1,6 +1,16 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
+const {
+  deviationSignal,
+  hoursSignal,
+  median,
+  combine,
+  priorityBoost,
+  riskLevel,
+  ZERO_BASELINE_FLOORS,
+} = require('../lib/ueba-scoring');
+const { recomputeBaseline } = require('../lib/baseline');
 
 const router = express.Router();
 
@@ -29,6 +39,7 @@ router.post('/baseline', authenticate, requireRole('ADMIN', 'ANALYST'), async (r
   try {
     const {
       userId,
+      department,
       avgDailyFiles,
       avgDailyVolumeMB,
       avgWorkingHourStart,
@@ -44,6 +55,10 @@ router.post('/baseline', authenticate, requireRole('ADMIN', 'ANALYST'), async (r
     const baseline = await prisma.userBehaviorBaseline.upsert({
       where: { userId },
       update: {
+        // undefined leaves the stored department alone; an explicit null
+        // clears it. Omitting the field from a numbers-only edit should not
+        // drop the user out of peer scoring.
+        ...(department !== undefined ? { department } : {}),
         avgDailyFiles,
         avgDailyVolumeMB,
         avgWorkingHourStart: avgWorkingHourStart ?? 9,
@@ -54,6 +69,7 @@ router.post('/baseline', authenticate, requireRole('ADMIN', 'ANALYST'), async (r
       },
       create: {
         userId,
+        department: department ?? null,
         avgDailyFiles,
         avgDailyVolumeMB,
         avgWorkingHourStart: avgWorkingHourStart ?? 9,
@@ -98,72 +114,22 @@ router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'A
   try {
     const { userId } = req.params;
     const days = Math.max(1, Number(req.query.days) || 30);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const events = await prisma.behaviorEvent.findMany({
-      where: { userId, timestamp: { gte: since } },
-      select: { eventType: true, metadata: true },
+    // Shared with the background refresh job (lib/baseline-refresh.js) so an
+    // automatic refresh produces exactly what this button produces.
+    const result = await recomputeBaseline({
+      userId,
+      days,
+      department: req.query.department,
     });
 
-    if (events.length === 0) {
+    if (!result) {
       return res.status(404).json({
         error: `No behavior events recorded for this user in the last ${days} day(s) -- nothing to compute a baseline from`,
       });
     }
 
-    let totalFiles = 0;
-    let totalVolumeMB = 0;
-    let usbInserts = 0;
-    let largeFileTransfers = 0;
-    const hours = [];
-
-    for (const e of events) {
-      if (e.eventType === 'FILE_ACCESS' || e.eventType === 'AFTER_HOURS_ACCESS') {
-        totalFiles += Number(e.metadata?.count) || 0;
-        totalVolumeMB += Number(e.metadata?.sizeMB) || 0;
-        if (typeof e.metadata?.hour === 'number') hours.push(e.metadata.hour);
-      } else if (e.eventType === 'USB_INSERT') {
-        usbInserts += 1;
-      } else if (e.eventType === 'LARGE_FILE_TRANSFER') {
-        // Its own event, on top of (not part of) FILE_ACCESS/
-        // AFTER_HOURS_ACCESS -- a file over the large-file threshold is
-        // excluded from the routine content-scan path entirely (see
-        // agent/src/file_watcher.py), so its volume is never double-counted.
-        totalVolumeMB += Number(e.metadata?.sizeMB) || 0;
-        largeFileTransfers += 1;
-      }
-    }
-
-    hours.sort((a, b) => a - b);
-    // 10th/90th percentile rather than min/max -- a couple of one-off late
-    // nights shouldn't redefine this user's whole "working hours" baseline.
-    const percentile = (p) => hours.length ? hours[Math.floor(p * (hours.length - 1))] : null;
-    const round2 = (n) => Math.round(n * 100) / 100;
-
-    const existing = await prisma.userBehaviorBaseline.findUnique({ where: { userId } });
-
-    const baseline = await prisma.userBehaviorBaseline.upsert({
-      where: { userId },
-      update: {
-        avgDailyFiles: round2(totalFiles / days),
-        avgDailyVolumeMB: round2(totalVolumeMB / days),
-        avgWorkingHourStart: percentile(0.1) ?? existing?.avgWorkingHourStart ?? 9,
-        avgWorkingHourEnd: percentile(0.9) ?? existing?.avgWorkingHourEnd ?? 18,
-        avgUsbFrequency: round2(usbInserts / days),
-        lastUpdated: new Date(),
-      },
-      create: {
-        userId,
-        avgDailyFiles: round2(totalFiles / days),
-        avgDailyVolumeMB: round2(totalVolumeMB / days),
-        avgWorkingHourStart: percentile(0.1) ?? 9,
-        avgWorkingHourEnd: percentile(0.9) ?? 18,
-        avgUsbFrequency: round2(usbInserts / days),
-        riskScore: 0,
-        lastUpdated: new Date(),
-      },
-    });
-
+    const { baseline, computedFrom } = result;
     // Audited like the manual path above. A recompute is derived from real
     // event history rather than typed in, but it still overwrites the numbers
     // every future risk score is measured against -- and the window (`days`)
@@ -180,14 +146,14 @@ router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'A
           monitoredUserId: userId,
           source: 'RECOMPUTED',
           days,
-          eventCount: events.length,
+          eventCount: computedFrom.eventCount,
           avgDailyFiles: baseline.avgDailyFiles,
           avgDailyVolumeMB: baseline.avgDailyVolumeMB,
         },
       },
     });
 
-    res.json({ ...baseline, computedFrom: { eventCount: events.length, days, largeFileTransfers } });
+    res.json({ ...baseline, computedFrom });
   } catch (err) {
     next(err);
   }
@@ -282,21 +248,184 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       prisma.behaviorEvent.count({ where: { userId, timestamp: { gte: since } } }),
     ]);
 
-    const baseScore  = baseline?.riskScore ?? 0;
-    const liveScore  = Math.min(
-      baseScore + afterHours * 0.1 + usbInserts * 0.05 + largeFileTransfers * 0.15,
-      1.0,
+    // What the user ACTUALLY did in the last 24 h, in the same units the
+    // baseline is expressed in. Without this the baseline could never be
+    // compared against anything -- which was the bug: avgDailyFiles and
+    // avgDailyVolumeMB were computed, displayed, and never read.
+    const todayEvents = await prisma.behaviorEvent.findMany({
+      where: { userId, timestamp: { gte: since } },
+      select: { eventType: true, metadata: true, agentId: true },
+    });
+
+    let todayFiles = 0;
+    let todayVolumeMB = 0;
+    const todayHours = [];
+
+    for (const e of todayEvents) {
+      if (e.eventType === 'FILE_ACCESS' || e.eventType === 'AFTER_HOURS_ACCESS') {
+        todayFiles += Number(e.metadata?.count) || 0;
+        todayVolumeMB += Number(e.metadata?.sizeMB) || 0;
+      } else if (e.eventType === 'LARGE_FILE_TRANSFER') {
+        todayVolumeMB += Number(e.metadata?.sizeMB) || 0;
+      }
+      if (typeof e.metadata?.hour === 'number') todayHours.push(e.metadata.hour);
+    }
+
+    // Peer medians, when the user has a declared department. Computed from the
+    // OTHER members' baselines -- including the user's own would let a single
+    // outlier partly define the group they are being compared against.
+    let peers = [];
+    if (baseline?.department) {
+      peers = await prisma.userBehaviorBaseline.findMany({
+        where: { department: baseline.department, userId: { not: userId } },
+        select: { avgDailyFiles: true, avgDailyVolumeMB: true, avgUsbFrequency: true },
+      });
+    }
+    const hasPeers = peers.length > 0;
+    const peerMedians = hasPeers ? {
+      files: median(peers.map((p) => p.avgDailyFiles)),
+      volumeMB: median(peers.map((p) => p.avgDailyVolumeMB)),
+      usb: median(peers.map((p) => p.avgUsbFrequency)),
+    } : null;
+
+    const components = {};
+    if (baseline) {
+      const vol = deviationSignal(todayVolumeMB, baseline.avgDailyVolumeMB, ZERO_BASELINE_FLOORS.volumeMB);
+      const fil = deviationSignal(todayFiles, baseline.avgDailyFiles, ZERO_BASELINE_FLOORS.files);
+      const usb = deviationSignal(usbInserts, baseline.avgUsbFrequency, ZERO_BASELINE_FLOORS.usb);
+      const hrs = hoursSignal(todayHours, baseline.avgWorkingHourStart, baseline.avgWorkingHourEnd);
+
+      const peerVol = hasPeers ? deviationSignal(todayVolumeMB, peerMedians.volumeMB, ZERO_BASELINE_FLOORS.volumeMB) : null;
+      const peerFil = hasPeers ? deviationSignal(todayFiles, peerMedians.files, ZERO_BASELINE_FLOORS.files) : null;
+      const peerUsb = hasPeers ? deviationSignal(usbInserts, peerMedians.usb, ZERO_BASELINE_FLOORS.usb) : null;
+
+      components.volume = {
+        observed: Math.round(todayVolumeMB * 100) / 100,
+        baseline: baseline.avgDailyVolumeMB,
+        ratio: vol.ratio,
+        signal: vol.signal,
+        peerBaseline: hasPeers ? peerMedians.volumeMB : null,
+        peerRatio: peerVol?.ratio ?? null,
+        peerSignal: peerVol?.signal ?? null,
+      };
+      components.files = {
+        observed: todayFiles,
+        baseline: baseline.avgDailyFiles,
+        ratio: fil.ratio,
+        signal: fil.signal,
+        peerBaseline: hasPeers ? peerMedians.files : null,
+        peerRatio: peerFil?.ratio ?? null,
+        peerSignal: peerFil?.signal ?? null,
+      };
+      components.hours = {
+        observed: hrs.outside,
+        total: hrs.total,
+        baseline: `${baseline.avgWorkingHourStart}-${baseline.avgWorkingHourEnd}`,
+        ratio: null,
+        signal: hrs.signal,
+        peerSignal: null,
+      };
+      components.usb = {
+        observed: usbInserts,
+        baseline: baseline.avgUsbFrequency,
+        ratio: usb.ratio,
+        signal: usb.signal,
+        peerBaseline: hasPeers ? peerMedians.usb : null,
+        peerRatio: peerUsb?.ratio ?? null,
+        peerSignal: peerUsb?.signal ?? null,
+      };
+    }
+
+    const deviationScore = combine(components);
+
+    // Event-type bonuses are kept, at reduced weight. They carry information
+    // deviation does not: a LARGE_FILE_TRANSFER is categorically interesting
+    // even at volumes within this user's normal range. They are no longer the
+    // whole score, which is what they were before.
+    const eventBonus = Math.min(
+      0.3,
+      afterHours * 0.05 + usbInserts * 0.02 + largeFileTransfers * 0.08,
     );
-    const level      = liveScore >= 0.7 ? 'HIGH' : liveScore >= 0.4 ? 'MEDIUM' : 'LOW';
+
+    // WHAT the user touched, not just how much. A deviation score cannot tell
+    // 500 MB of build artefacts from 500 MB of cardholder data.
+    //
+    // BehaviorEvent carries userId; Incident carries agentId. There is no
+    // direct link, so a user is associated with the incidents raised on the
+    // endpoints they were active on in the same window. Honest limitation: on
+    // a shared workstation this attributes an incident to whoever else was
+    // active there. Correcting it would mean the agent stamping the OS user
+    // onto every incident it reports.
+    const activeAgentIds = [...new Set(todayEvents.map((e) => e.agentId).filter(Boolean))];
+
+    let findings = [];
+    if (activeAgentIds.length > 0) {
+      const [incidents, attempts] = await Promise.all([
+        prisma.incident.findMany({
+          where: { agentId: { in: activeAgentIds }, createdAt: { gte: since } },
+          select: { severity: true, policy: { select: { conditions: true } } },
+        }),
+        prisma.aiLeakAttempt.findMany({
+          where: { agentId: { in: activeAgentIds }, timestamp: { gte: since } },
+          select: { policy: { select: { severity: true, conditions: true } } },
+        }),
+      ]);
+
+      findings = [
+        ...incidents.map((i) => ({
+          severity: i.severity,
+          rule: i.policy?.conditions?.complianceRule ?? null,
+        })),
+        // An AI leak attempt has no severity of its own -- it inherits the
+        // severity of the policy it violated. Attempts predating the policyId
+        // column have no policy at all and are skipped rather than guessed at.
+        ...attempts
+          .filter((a) => a.policy)
+          .map((a) => ({
+            severity: a.policy.severity,
+            rule: a.policy.conditions?.complianceRule ?? null,
+          })),
+      ];
+    }
+
+    const priority = priorityBoost(findings);
+
+    // With no baseline there is nothing to deviate FROM, so the score falls
+    // back to the bonuses alone rather than reporting a confident zero.
+    const liveScore = baseline
+      ? Math.min(1, deviationScore + eventBonus + priority.boost)
+      : Math.min(1, eventBonus + priority.boost);
 
     res.json({
       userId,
-      baselineRiskScore: baseScore,
+      department: baseline?.department ?? null,
+      baselineRiskScore: baseline?.riskScore ?? 0,
       liveRiskScore: parseFloat(liveScore.toFixed(3)),
-      riskLevel: level,
-      last24h: { total: total24h, afterHoursAccess: afterHours, usbInserts, largeFileTransfers },
+      riskLevel: riskLevel(liveScore),
+      // The breakdown is the point: an analyst has to be able to see WHICH
+      // metric drove the score, not just that it was high.
+      deviationScore: parseFloat(deviationScore.toFixed(3)),
+      eventBonus: parseFloat(eventBonus.toFixed(3)),
+      priorityBoost: parseFloat(priority.boost.toFixed(3)),
+      // Which compliance rules drove the boost, so the dashboard can say
+      // "PCI-DSS, HIPAA" rather than showing an unexplained number.
+      priorityRules: priority.rules,
+      prioritySeverities: priority.bySeverity,
+      components,
+      peerGroup: baseline?.department
+        ? { department: baseline.department, peerCount: peers.length }
+        : null,
+      last24h: {
+        total: total24h,
+        afterHoursAccess: afterHours,
+        usbInserts,
+        largeFileTransfers,
+        files: todayFiles,
+        volumeMB: Math.round(todayVolumeMB * 100) / 100,
+      },
       baselineExists: !!baseline,
       baseline: baseline ? {
+        department: baseline.department,
         avgDailyFiles: baseline.avgDailyFiles,
         avgDailyVolumeMB: baseline.avgDailyVolumeMB,
         avgWorkingHourStart: baseline.avgWorkingHourStart,

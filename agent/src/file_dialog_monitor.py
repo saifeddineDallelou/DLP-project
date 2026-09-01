@@ -303,6 +303,9 @@ def _dialog_monitor_loop(
     # hwnd -> last filename text already classified, so we don't re-scan on
     # every poll while the user is still just browsing with nothing typed
     seen: dict[int, str] = {}
+    # hwnd -> filename we have already logged as unresolvable, so a retry loop
+    # running at 0.1 s does not fill the log with the same line.
+    unresolved: dict[int, str] = {}
     # hwnd -> (resolved folder, resolved_at). Resolved eagerly as soon as the
     # dialog is seen, and refreshed every _FOLDER_CACHE_TTL seconds in case
     # the user navigates elsewhere -- not resolved reactively after a
@@ -320,10 +323,15 @@ def _dialog_monitor_loop(
         if poll_num % 600 == 0:  # ~ every 60 s at 0.1 s/poll
             logger.debug(f"[FILE-DIALOG] Alive | poll=#{poll_num}")
 
-        for hwnd in list(seen):
+        # Iterate the union, not just `seen` -- a dialog now only lands in
+        # `seen` once something was actually classified, so one that was
+        # browsed and closed without a pick would otherwise leak its
+        # folder_cache and unresolved entries for the life of the process.
+        for hwnd in {*seen, *folder_cache, *unresolved}:
             if not _user32.IsWindow(hwnd):
-                del seen[hwnd]
+                seen.pop(hwnd, None)
                 folder_cache.pop(hwnd, None)
+                unresolved.pop(hwnd, None)
 
         dialogs = _find_dialog_windows()
         if not dialogs:
@@ -350,15 +358,30 @@ def _dialog_monitor_loop(
             # actually closes the double-click race (see folder_cache above).
             cached_folder = folder_cache.get(hwnd)
             if cached_folder is None or (time.monotonic() - cached_folder[1]) > _FOLDER_CACHE_TTL:
-                folder_cache[hwnd] = (_get_dialog_folder(hwnd) or "", time.monotonic())
+                resolved = _get_dialog_folder(hwnd)
+                # Only cache a SUCCESSFUL resolution. A dialog that has just
+                # appeared is often still rendering, and the UIA address-bar
+                # read returns nothing for the first poll or two. Caching that
+                # empty result made a transient miss stick for the whole TTL,
+                # so the file could never be resolved and the pick was never
+                # blocked -- while the very next poll, 0.1 s later, would have
+                # succeeded. Observed live as an intermittent failure to block.
+                if resolved:
+                    folder_cache[hwnd] = (resolved, time.monotonic())
 
             filename_text = _get_dialog_filename(hwnd)
             logger.info(f"[FILE-DIALOG] hwnd={hwnd} filename field: {filename_text!r}")
             if not filename_text or seen.get(hwnd) == filename_text:
                 continue
-            seen[hwnd] = filename_text
 
-            folder = folder_cache[hwnd][0]
+            folder = folder_cache.get(hwnd, ("", 0.0))[0]
+            # `seen` is now set only once a candidate has actually been
+            # RESOLVED and classified -- see the end of this block. Marking it
+            # up front meant a single failed resolution permanently disabled
+            # blocking for this dialog, because the retry was skipped as
+            # already-seen.
+            classified_any = False
+
             for name in _candidate_paths(filename_text):
                 path = name
                 if not os.path.isfile(path):
@@ -366,7 +389,13 @@ def _dialog_monitor_loop(
                     # against the dialog's current folder instead.
                     path = os.path.join(folder, name) if folder else path
                 if not os.path.isfile(path):
-                    logger.debug(f"[FILE-DIALOG] Could not resolve '{name}' to a real file")
+                    if unresolved.get(hwnd) != name:
+                        # Log once per (dialog, name), not on every 0.1 s poll.
+                        unresolved[hwnd] = name
+                        logger.debug(
+                            f"[FILE-DIALOG] Could not resolve '{name}' yet "
+                            f"(folder={folder or 'unknown'}) -- will retry"
+                        )
                     continue
                 try:
                     size = os.path.getsize(path)
@@ -387,6 +416,10 @@ def _dialog_monitor_loop(
                 if result is None:
                     logger.warning("[FILE-DIALOG] Classifier unavailable -- skipping")
                     continue
+
+                # Resolved, read and classified -- this filename has genuinely
+                # been handled, so it is safe to stop re-checking it.
+                classified_any = True
 
                 risk_score: float = result.get("risk_score", 0.0)
                 detections: list  = result.get("detections", [])
@@ -443,6 +476,14 @@ def _dialog_monitor_loop(
                     logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
                 else:
                     logger.error("[FILE-DIALOG] Failed to record leak attempt -- backend may be down")
+
+            # Only now, once something was actually resolved and classified.
+            # If nothing was, this filename is deliberately left unseen so the
+            # next poll retries it -- the dialog may simply not have been ready
+            # to report its folder yet.
+            if classified_any:
+                seen[hwnd] = filename_text
+                unresolved.pop(hwnd, None)
 
         stop.wait(_POLL_INTERVAL)
 

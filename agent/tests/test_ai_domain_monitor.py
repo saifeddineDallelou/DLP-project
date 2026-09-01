@@ -351,6 +351,16 @@ class TestDetectPlatformViaAddressBar:
 
 
 class TestAiBlockerDetectPlatformTiers:
+    @pytest.fixture(autouse=True)
+    def _neutral_foreground(self):
+        # _detect_platform now consults the FOREGROUND window before scanning
+        # every window, so these tier tests must pin it to something that
+        # matches nothing -- otherwise they pick up whatever real window is
+        # focused on the machine running them and become non-deterministic.
+        # The foreground-priority behaviour itself is covered separately below.
+        with patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")):
+            yield
+
     def _make_blocker(self):
         return AiBlocker(MagicMock(), "agent-1")
 
@@ -411,6 +421,75 @@ class TestAiBlockerDetectPlatformTiers:
              patch("ai_domain_monitor._window_owner_pids", return_value=set()):  # pid 999 owns no window
             plat, detail = blocker._detect_platform()
         assert plat is None
+
+    def test_foreground_platform_wins_over_another_open_ai_window(self):
+        # The bug this exists for: a paste into a focused ChatGPT tab was
+        # recorded as ANTHROPIC_CLAUDE, because an always-open Claude Code
+        # window matched earlier in the window enumeration. Blocking was
+        # correct; the platform on the incident was not.
+        blocker = self._make_blocker()
+        with patch(
+            "ai_domain_monitor._get_foreground_window",
+            return_value=(42, "ChatGPT - Google Chrome"),
+        ), patch(
+            "ai_domain_monitor._enum_all_windows",
+            # Claude Code first, exactly as the enumeration returned it live.
+            return_value=[(1, "✳ Claude Code"), (42, "ChatGPT - Google Chrome")],
+        ):
+            plat, detail = blocker._detect_platform()
+        assert plat == "OPENAI_CHATGPT"
+        assert "foreground=" in detail
+
+    def test_foreground_browser_url_is_checked_before_other_windows(self):
+        # ChatGPT renames its tab to the conversation topic once you start
+        # chatting, so the focused window's TITLE matches nothing -- which is
+        # precisely how a background Claude Code window won the attribution.
+        blocker = self._make_blocker()
+        with patch(
+            "ai_domain_monitor._get_foreground_window",
+            return_value=(42, "Quarterly figures - Google Chrome"),
+        ), patch(
+            "ai_domain_monitor._enum_all_windows",
+            return_value=[(1, "✳ Claude Code"), (42, "Quarterly figures - Google Chrome")],
+        ), patch(
+            "ai_domain_monitor._detect_platform_via_address_bar",
+            return_value="OPENAI_CHATGPT",
+        ):
+            plat, detail = blocker._detect_platform()
+        assert plat == "OPENAI_CHATGPT"
+        assert "foreground-url=" in detail
+
+    def test_background_ai_window_still_detected_when_foreground_is_not_ai(self):
+        # Attribution changed; blocking did not. An AI tab sitting in the
+        # background is still a live paste target and must still be found.
+        blocker = self._make_blocker()
+        with patch(
+            "ai_domain_monitor._get_foreground_window",
+            return_value=(7, "Untitled - Notepad"),
+        ), patch(
+            "ai_domain_monitor._enum_all_windows",
+            return_value=[(7, "Untitled - Notepad"), (1, "ChatGPT - Google Chrome")],
+        ), patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, detail = blocker._detect_platform()
+        assert plat == "OPENAI_CHATGPT"
+        assert "window=" in detail
+
+    def test_foreground_non_browser_does_not_trigger_an_address_bar_read(self):
+        blocker = self._make_blocker()
+        with patch(
+            "ai_domain_monitor._get_foreground_window",
+            return_value=(7, "Untitled - Notepad"),
+        ), patch(
+            "ai_domain_monitor._enum_all_windows",
+            return_value=[(7, "Untitled - Notepad")],
+        ), patch(
+            "ai_domain_monitor._detect_platform_via_address_bar",
+        ) as mock_url, patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            blocker._detect_platform()
+        # Tier 2 may still consult it for OTHER browser windows, but the
+        # foreground shortcut must not have fired for a non-browser.
+        for call in mock_url.call_args_list:
+            assert call.args[0] != 7
 
     def test_address_bar_only_checked_for_browser_windows(self):
         blocker = self._make_blocker()

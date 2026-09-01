@@ -198,3 +198,110 @@ class TestDialogMonitorLoopActionBranching:
         mock_close = self._run_one_iteration(client, None, str(f))
 
         mock_close.assert_called_once_with(111)
+
+
+class TestTransientFolderResolutionRetries:
+    """
+    A dialog that has just appeared is often still rendering, and the UIA
+    address-bar read returns nothing for the first poll or two. Two bugs
+    turned that momentary miss into a permanent one:
+
+      1. the empty folder was cached for the whole TTL, and
+      2. the filename was marked `seen` BEFORE resolution was attempted,
+         so the retry 0.1 s later was skipped as already-handled.
+
+    Together they made blocking a coin flip on how quickly the dialog
+    rendered -- observed live as the same file being blocked on one attempt
+    and sailing through on another.
+    """
+
+    def _drive(self, client, resolver, filename_text, folder_sequence, iterations):
+        """Run the loop for N iterations, returning a different folder result
+        each time to simulate UIA becoming ready."""
+        stop = threading.Event()
+        state = {"n": 0}
+
+        def fake_wait(timeout=None):
+            state["n"] += 1
+            if state["n"] >= iterations:
+                stop.set()
+
+        folders = iter(folder_sequence)
+
+        def next_folder(_hwnd):
+            try:
+                return next(folders)
+            except StopIteration:
+                return folder_sequence[-1]
+
+        with patch.object(stop, "wait", side_effect=fake_wait), \
+             patch("file_dialog_monitor._find_dialog_windows", return_value=[111]), \
+             patch("file_dialog_monitor._active_ai_platform", return_value="OPENAI_CHATGPT"), \
+             patch("file_dialog_monitor._get_dialog_folder", side_effect=next_folder), \
+             patch("file_dialog_monitor._get_dialog_filename", return_value=filename_text), \
+             patch("file_dialog_monitor._user32") as mock_user32, \
+             patch("file_dialog_monitor._close_dialog") as mock_close:
+            mock_user32.IsWindow.return_value = True
+            file_dialog_monitor._dialog_monitor_loop(client, "agent-1", stop, resolver)
+        return mock_close
+
+    def _client(self):
+        client = MagicMock()
+        client.classify.return_value = {
+            "risk_score": 0.95,
+            "detections": [{"type": "credit_card", "value": "****-****-****-1111", "rule": "PCI-DSS"}],
+        }
+        client.report_ai_leak_attempt.return_value = {"id": "leak-1"}
+        return client
+
+    def _resolver(self):
+        r = MagicMock()
+        r.resolve.return_value = {"id": "p1", "action": "BLOCK", "name": "PCI-DSS"}
+        return r
+
+    def test_blocks_once_the_folder_becomes_resolvable(self, tmp_path):
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        client, resolver = self._client(), self._resolver()
+
+        # First poll: UIA not ready, no folder. Second poll: folder available.
+        mock_close = self._drive(
+            client, resolver,
+            filename_text="card.txt",
+            folder_sequence=["", str(tmp_path)],
+            iterations=3,
+        )
+
+        # Before the fix this never blocked: the empty folder was cached and
+        # the filename was already marked seen.
+        mock_close.assert_called_with(111)
+        assert client.report_ai_leak_attempt.called
+
+    def test_does_not_reclassify_once_it_has_succeeded(self, tmp_path):
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        client, resolver = self._client(), self._resolver()
+
+        self._drive(
+            client, resolver,
+            filename_text="card.txt",
+            folder_sequence=[str(tmp_path)],
+            iterations=4,
+        )
+
+        # `seen` must still suppress repeat work for a filename already
+        # handled -- the retry behaviour must not become a re-scan loop.
+        assert client.classify.call_count == 1
+
+    def test_a_permanently_unresolvable_name_is_not_a_crash_or_a_block(self):
+        client, resolver = self._client(), self._resolver()
+
+        mock_close = self._drive(
+            client, resolver,
+            filename_text="no-such-file.txt",
+            folder_sequence=[""],
+            iterations=3,
+        )
+
+        mock_close.assert_not_called()
+        client.classify.assert_not_called()
