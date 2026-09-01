@@ -34,6 +34,55 @@ def _luhn_check(number: str) -> bool:
         total += d
     return total % 10 == 0
 
+# ── SWIFT/BIC validation ───────────────────────────────────────────────────────
+#
+# The BIC regex alone is "eight uppercase characters", which matches ordinary
+# English words: INTERNAL, PASSWORD, KEYWORDS, REDACTED, STRATEGY, BLOCKING all
+# matched, every one reported as PCI-DSS. Found by running the discovery
+# scanner over this project's own source -- the live monitors never saw it
+# because they only ever classify small, already-suspicious fragments.
+#
+# ISO 9362 gives a real constraint the regex ignores: characters 5-6 are an
+# ISO 3166-1 alpha-2 country code. That alone rejects most words.
+#
+# It is not sufficient on its own -- BLOCKING has "IN" (India) in that
+# position -- so a bare BIC also has to appear near banking language. Real
+# products require the same supporting evidence for exactly this reason: an
+# eight-letter token, with no context, is genuinely ambiguous, and guessing
+# produces the false positives above.
+
+_ISO_3166_ALPHA2 = frozenset("""
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL
+BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV
+CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD
+GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM
+IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK
+LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW
+MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR
+PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS
+ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY
+UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
+""".split())
+
+# Banking language that makes a bare eight-character token credible as a BIC.
+_BIC_CONTEXT = (
+    "swift", "bic", "iban", "beneficiary", "remittance", "correspondent",
+    "bank", "banque", "wire transfer", "sort code", "account number",
+    "rib", "virement", "bénéficiaire", "beneficiaire",
+)
+_BIC_CONTEXT_WINDOW = 200   # characters either side
+
+
+def _bic_check(raw: str, text: str, start: int) -> bool:
+    if len(raw) not in (8, 11):
+        return False
+    if raw[4:6] not in _ISO_3166_ALPHA2:
+        return False
+
+    window = text[max(0, start - _BIC_CONTEXT_WINDOW): start + len(raw) + _BIC_CONTEXT_WINDOW].lower()
+    return any(term in window for term in _BIC_CONTEXT)
+
+
 # ── Value masking helpers ──────────────────────────────────────────────────────
 
 def _mask_card(raw: str) -> str:
@@ -76,6 +125,11 @@ class _Pat:
     confidence: float
     mask: Callable[[str], str]
     luhn: bool = False
+    # Optional second opinion on a regex hit, given the raw match plus the
+    # surrounding text so context can be considered. Generalises what `luhn`
+    # does for card numbers: a regex says "this is the right SHAPE", and some
+    # formats need more than shape before they are worth reporting.
+    validate: Callable[[str, str, int], bool] | None = None
 
 # ── Ordered pattern list (high-confidence / high-priority first) ───────────────
 # Order matters: matched spans are "consumed" so generic patterns (8-digit CIN)
@@ -126,6 +180,8 @@ PATTERNS: List[_Pat] = [
         weight=0.25,
         confidence=0.85,
         mask=lambda r: _mask_tail(r, 4),
+        # The regex alone is "eight uppercase characters" -- see _bic_check.
+        validate=_bic_check,
     ),
 
     # ── Government / national IDs ──────────────────────────────────────────────
@@ -265,6 +321,9 @@ def _run_patterns(text: str) -> List[Dict[str, Any]]:
             raw = m.group()
 
             if pat.luhn and not _luhn_check(raw):
+                continue
+
+            if pat.validate and not pat.validate(raw, text, m.start()):
                 continue
 
             claimed |= span_set
