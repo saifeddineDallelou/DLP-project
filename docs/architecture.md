@@ -229,6 +229,39 @@ a Windows limitation rather than an oversight:
 | `screenshot_monitor` | Windows 10/11 handles `PrtScn` and `Win+Shift+S` in the Shell before any `SetWindowsHookEx` hook sees them. Confirmed unchanged with admin rights. Polling the clipboard for an image works regardless of *how* the screenshot was taken. |
 | `file_dialog_monitor` | There is no global "a file was chosen in a dialog" event. It polls for window class `#32770` and reads the filename before the user confirms. |
 | `app_file_monitor` | Catching a process that opens a file *after* the filesystem event already fired would need ETW or a kernel driver. A periodic re-check narrows the gap to one poll interval. |
+| `drag_drop_monitor` | An OLE drop hands the file straight from Explorer to the browser through `IDropTarget::Drop`. Hooking that needs a DLL injected into the browser process — fragile across versions, and exactly what EDR software exists to flag. |
+
+### Cancelling a drag instead of intercepting a drop
+
+Dragging a file from Explorer onto a chat window is the most natural way to
+attach one, and it touches neither the clipboard nor a file dialog — so it was
+the one leak path with no coverage at all.
+
+Rather than intercept the drop, `drag_drop_monitor.py` cancels the drag.
+Windows aborts an in-flight OLE drag on **Escape** — `DoDragDrop` returns
+`DRAGDROP_S_CANCEL` and the drop never happens:
+
+```
+ mouse down over Explorer  ─► read Explorer's SELECTION (Shell.Application COM)
+                                        │
+                                        ▼
+                              classify it immediately, in the background
+                                        │
+ cursor crosses into an AI window ──────┤
+                                        ▼
+                              verdict sensitive? send ESC
+```
+
+Classifying when the drag *starts*, not when it reaches the browser, is what
+makes this work at all — a classify round trip begun at the moment the cursor
+enters a browser would lose the race against the drop. Same eager-resolution
+pattern `file_dialog_monitor.py` uses to beat a fast double-click.
+
+Its limits are real and stated in the module: only drags **originating in an
+Explorer window** are visible (another app's custom drag source exposes no
+readable selection), desktop icons are not covered, and if classification is
+still running when the user releases, the drop succeeds — reported honestly as
+*not blocked* rather than claimed otherwise.
 
 Known gaps are documented in the module docstrings — notably OLE drag-and-drop
 in `file_dialog_monitor.py`, which never touches the clipboard or a dialog.

@@ -26,6 +26,7 @@ from screenshot_monitor import start_screenshot_monitor
 from app_launch_monitor import start_app_launch_monitor
 from file_dialog_monitor import start_file_dialog_monitor
 from app_file_monitor    import start_app_file_monitor
+from drag_drop_monitor  import start_drag_drop_monitor
 
 _STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -35,6 +36,7 @@ _BANNER = """
 |   Platform: Simulated Endpoint Agent             |
 |   Modules : File / Clipboard / AI-Domain / UEBA  |
 |             Screenshot / App-Launch / File-Dialog |
+|             Drag-Drop                            |
 +--------------------------------------------------+"""
 
 
@@ -187,45 +189,49 @@ def main() -> None:
             daemon=True,
             name="heartbeat",
         ).start()
-        logger.info("[1/9] Heartbeat thread started")
+        logger.info("[1/10] Heartbeat thread started")
 
     # ── 2. File watcher ───────────────────────────────────────────────────────
     observer = start_watcher(
         [str(p) for p in watch_paths], client, agent_id or "", shared, policy_resolver, app_rule_resolver,
     )
-    logger.info("[2/9] File watcher started")
+    logger.info("[2/10] File watcher started")
 
     # ── 4. AI domain monitor (creates AiBlocker shared with clipboard watcher) ──
     _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop, policy_resolver)
-    logger.info("[4/9] AI domain monitor started")
+    logger.info("[4/10] AI domain monitor started")
 
     # ── 3. Clipboard watcher (receives blocker for immediate check-and-block) ──
     start_clipboard_watcher(client, agent_id or "", shared, stop, blocker, policy_resolver, app_rule_resolver)
-    logger.info("[3/9] Clipboard watcher started")
+    logger.info("[3/10] Clipboard watcher started")
 
     # ── 5. UEBA collector (background flush) ─────────────────────────────────
     start_ueba_collector(client, agent_id or "", shared, stop)
-    logger.info("[5/9] UEBA collector started")
+    logger.info("[5/10] UEBA collector started")
 
     # ── 6. Screenshot monitor ─────────────────────────────────────────────────
     start_screenshot_monitor(client, agent_id or "", stop, policy_resolver)
-    logger.info("[6/9] Screenshot monitor started")
+    logger.info("[6/10] Screenshot monitor started")
 
     # ── 7. App launch monitor ─────────────────────────────────────────────────
     start_app_launch_monitor(client, agent_id or "", stop)
-    logger.info("[7/9] App launch monitor started")
+    logger.info("[7/10] App launch monitor started")
 
     # ── 8. File dialog monitor (blocks sensitive file picks in AI tabs) ──────
     start_file_dialog_monitor(client, agent_id or "", stop, policy_resolver)
-    logger.info("[8/9] File dialog monitor started")
+    logger.info("[8/10] File dialog monitor started")
 
     # ── 9. App file monitor (periodic re-check of restricted apps vs sensitive files) ──
     start_app_file_monitor(client, agent_id or "", shared, stop, app_rule_resolver)
-    logger.info("[9/9] App file monitor started")
+    logger.info("[9/10] App file monitor started")
+
+    # ── 10. Drag-drop monitor (cancels a sensitive Explorer drag onto an AI tab) ──
+    start_drag_drop_monitor(client, agent_id or "", stop, policy_resolver)
+    logger.info("[10/10] Drag-drop monitor started")
 
     logger.success(
         f"DLP Agent fully operational -- "
-        f"watching {len(watch_paths)} folder(s) | 9 monitors active"
+        f"watching {len(watch_paths)} folder(s) | 10 monitors active"
     )
     logger.info("Press Ctrl+C to stop\n")
 
