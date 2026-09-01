@@ -78,6 +78,43 @@ classifier detection.rule ──── "PCI-DSS" ────► policy.conditio
 
 ---
 
+### Exact Data Match
+
+The compliance-tag seam above describes *pattern* detection. `classifier/src/edm.py`
+adds a second, orthogonal detector that runs alongside it.
+
+Regex asks whether content has the right **shape**. EDM asks whether it is
+**one of ours** — matching against a hashed index of the organisation's actual
+records. That catches two things patterns cannot:
+
+- values with no distinguishing shape at all — a customer name, an account
+  reference, an employee ID. No regex describes "Sarah Okafor"
+- the difference between a real card number and a test one. Regex fires on
+  both; EDM fires only on the one in the reference set
+
+**Raw values are never stored.** A reference set is salted HMAC-SHA256 digests
+and nothing else. Holding a copy of the customer database inside the tool meant
+to protect it would create precisely the concentration of sensitive data the
+product exists to prevent. The salt is not decoration: a surname or a six-digit
+account number has too little entropy to survive an unsalted digest against a
+dictionary attack, so `EDM_SALT` must be set per deployment.
+
+Two implementation details that were bugs first:
+
+*Phrase matching.* An indexed value like "Sarah Okafor" is one value, but text
+tokenised word-by-word yields "Sarah" and "Okafor" separately. Scanning
+generates word sequences bounded by the longest phrase a set actually indexes —
+without which EDM silently fails on exactly the values it exists for.
+
+*Normalisation.* A database holds `O'Brien`; a Word document holds `O’Brien`.
+Case, accents, separators and typographic punctuation are all folded before
+hashing, or EDM matches only identically formatted values.
+
+**Scope, stated honestly:** this matches per-value. Purview and Symantec
+correlate several fields from the same *row* before firing, which is what makes
+a common single column safe to index. Row correlation is the honest next step
+and is not implemented.
+
 ## 3. Request flow of a single leak attempt
 
 Clipboard copy into ChatGPT, the most common path:
