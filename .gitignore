@@ -32,3 +32,7 @@ Thumbs.db
 
 # Personal scratch/prep files (not project code)
 .scratch/
+
+# EDM reference sets — salted digests of an organisation's real records.
+# Not raw data, but deployment state, and never something to commit.
+classifier/edm_store/
