@@ -17,7 +17,11 @@ Chromium-based browsers the file dialog is frequently owned by an internal,
 untitled helper window rather than the visible tab window, so owner-title
 checks silently miss every real browser dialog.
 
-KNOWN GAP -- OLE drag-and-drop (dragging a file icon from Explorer directly
+OLE drag-and-drop is NOT handled here -- see drag_drop_monitor.py, which
+covers it by cancelling the drag rather than intercepting the drop. The
+reasoning below explains why intercepting is not viable.
+
+FORMERLY A KNOWN GAP -- OLE drag-and-drop (dragging a file icon from Explorer directly
 onto a webpage's drop zone) is NOT covered by this module, or by any other
 monitor in this agent. Unlike clipboard copy/paste (CF_HDROP, handled in
 clipboard_watcher.py) or the native file picker (handled here), an OLE drop

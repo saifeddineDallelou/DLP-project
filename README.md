@@ -141,6 +141,7 @@ docstring explaining the vector it covers and its known gaps.
 | `screenshot_monitor.py` | Screenshots, via clipboard-image polling |
 | `app_launch_monitor.py` | Launches of watchlisted exfiltration tools |
 | `app_file_monitor.py` | Restricted apps holding an already-flagged file |
+| `drag_drop_monitor.py` | Dragging a file from Explorer onto an AI page — no clipboard, no dialog |
 
 **Decision and enforcement**
 
