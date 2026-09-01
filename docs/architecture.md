@@ -340,3 +340,18 @@ Sensitive values are masked by the classifier **before** they ever reach the
 backend, so an incident record holds `****-****-****-4242`, never the card
 number. Evidence is stored as `Bytes` with an encryption key configured
 separately (`EVIDENCE_ENCRYPTION_KEY`).
+
+That guarantee only holds because the agent reports *from the classifier's
+masked detections*, never from the raw content it inspected — see
+`agent/src/evidence.py`. This was not originally true. The clipboard paths
+masked the raw copied text with a length heuristic that returned anything
+30 characters or shorter unchanged, and sensitive values are short: a payment
+card is 19 characters, a US SSN is 11. Live testing wrote
+`" 4111 1111 1111 1111"` into `AiLeakAttempt.contentSample` verbatim — a DLP
+tool retaining unmasked cardholder data, which is itself a PCI-DSS
+Requirement 3 failure.
+
+The lesson generalises beyond the one bug: **the agent should never be the
+component deciding what is sensitive enough to redact.** The classifier already
+made that determination and already returns a safe representation. Any second
+redaction rule in the agent is a second place to get it wrong.

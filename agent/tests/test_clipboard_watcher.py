@@ -1,6 +1,7 @@
 from unittest.mock import patch, MagicMock
 
-from clipboard_watcher import _mask, _scan_copied_files, _check_restricted_app
+from clipboard_watcher import _scan_copied_files, _check_restricted_app
+from evidence import safe_sample
 
 
 class TestCheckRestrictedApp:
@@ -168,22 +169,77 @@ class TestCheckRestrictedAppReviewRequest:
         mock_thread.assert_not_called()
 
 
-class TestMask:
-    def test_short_text_returned_unmasked(self):
-        assert _mask("short") == "short"
+class TestReportedSampleNeverCarriesRawContent:
+    """
+    The tests that used to sit here asserted the bug as if it were the spec:
+    `test_short_text_returned_unmasked` asserted _mask("short") == "short",
+    and the long-text test asserted the output starts with text[:15] -- which
+    on "SSN is 123-45-6789, ..." keeps "SSN is 123-45-6". Both passed, and a
+    real payment card still reached the database intact.
 
-    def test_long_text_is_masked_in_the_middle(self):
-        text = "SSN is 123-45-6789, please keep this confidential and safe"
-        masked = _mask(text)
-        assert masked.startswith(text[:15])
-        assert "***[MASKED]***" in masked
-        assert masked.endswith(text[:100][-5:])
+    These assert the property that actually matters: whatever the agent
+    reports, the raw sensitive value is not in it.
+    """
 
-    def test_truncates_to_100_chars_before_masking(self):
-        text = "a" * 500
-        masked = _mask(text)
-        # only the first 100 chars are considered at all
-        assert len(masked) < 500
+    CARD = "4111 1111 1111 1111"
+    SSN = "123-45-6789"
+
+    def _detections(self):
+        # Shaped like real classifier output -- values already masked by
+        # classifier/src/engine.py before the agent ever sees them.
+        return [
+            {"type": "credit_card", "value": "****-****-****-1111", "rule": "PCI-DSS", "confidence": 0.95},
+            {"type": "ssn", "value": "***-**-6789", "rule": "HIPAA", "confidence": 0.9},
+        ]
+
+    def test_short_sensitive_value_is_never_echoed(self):
+        # The exact failure found in live testing: a 19-character card number
+        # fell under the old 30-character threshold and was stored verbatim.
+        sample = safe_sample(self._detections())
+        assert self.CARD not in sample
+        assert "4111" not in sample
+
+    def test_masked_values_from_the_classifier_are_preserved(self):
+        sample = safe_sample(self._detections())
+        assert "****-****-****-1111" in sample
+        assert "***-**-6789" in sample
+
+    def test_reports_type_and_compliance_rule_so_it_stays_useful(self):
+        sample = safe_sample(self._detections())
+        assert "credit_card" in sample
+        assert "PCI-DSS" in sample
+
+    def test_prefix_carries_context_without_content(self):
+        sample = safe_sample(self._detections(), prefix="FILE:payroll.xlsx")
+        assert sample.startswith("FILE:payroll.xlsx")
+        assert self.CARD not in sample
+
+    def test_keyword_detections_report_no_value(self):
+        # A keyword's "value" is a word from the user's document. Not a secret,
+        # but still their content -- the type and rule are enough.
+        sample = safe_sample([
+            {"type": "keyword", "value": "confidential salary data", "rule": "INTERNAL"},
+        ])
+        assert "confidential salary data" not in sample
+        assert "keyword" in sample
+        assert "INTERNAL" in sample
+
+    def test_caps_length_and_summarises_the_remainder(self):
+        many = [
+            {"type": f"type{i}", "value": f"***{i}", "rule": "GDPR"}
+            for i in range(12)
+        ]
+        sample = safe_sample(many)
+        assert len(sample) <= 100
+        assert "more" in sample
+
+    def test_describes_the_finding_when_there_is_nothing_to_name(self):
+        assert safe_sample([]) != ""
+        assert safe_sample(None) != ""
+
+    def test_ignores_malformed_detection_entries(self):
+        sample = safe_sample([None, "junk", {"type": "ssn", "value": "***-**-1234", "rule": "HIPAA"}])
+        assert "***-**-1234" in sample
 
 
 class TestScanCopiedFiles:

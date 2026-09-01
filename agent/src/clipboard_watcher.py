@@ -22,6 +22,7 @@ from loguru import logger
 from api_client      import DLPApiClient
 from agent_state     import AgentState
 from ai_domain_monitor import AiBlocker, _get_foreground_title
+from evidence        import safe_sample
 from file_extractor  import extract
 from file_watcher    import _risk_to_severity
 from quarantine      import quarantine_file
@@ -37,11 +38,11 @@ _DLP_BLOCK_MSG = "[BLOCKED BY DLP - Sensitive content detected]"
 _CF_HDROP = 15  # Windows clipboard format id for a file-drop list
 
 
-def _mask(text: str) -> str:
-    t = text[:100]
-    if len(t) > 30:
-        return t[:15] + "***[MASKED]***" + t[-5:]
-    return t
+# _mask() used to live here and masked the RAW copied text by length: anything
+# 30 characters or shorter was returned intact. Sensitive values are short -- a
+# payment card is 19 characters -- so the data this agent exists to protect was
+# written to the database unmasked. Reporting now builds its snippet from the
+# classifier's already-masked detections instead; see evidence.safe_sample.
 
 
 def _offer_incident_review_request(client: DLPApiClient, incident_id: str, label: str) -> None:
@@ -209,7 +210,9 @@ def _scan_copied_files(
             f"risk={risk_score:.2f} | types={types}"
         )
 
-        sample = f"FILE:{filename} | {_mask(text)}"
+        # Filename only as context -- the file's CONTENT never goes in the
+        # snippet, only the classifier's masked detections drawn from it.
+        sample = safe_sample(detections, prefix=f"FILE:{filename}")
 
         action_taken = blocker.check_and_block(
             t_detect=t_change,
@@ -343,7 +346,7 @@ def _clipboard_loop(
             # ── IMMEDIATE CHECK: is an AI window open right now? ──────────────
             action_taken = blocker.check_and_block(
                 t_detect=t_change,
-                content_sample=_mask(current),
+                content_sample=safe_sample(detections),
                 risk_score=risk_score,
                 source_tag="CLIPBOARD",
                 detections=detections,
@@ -375,7 +378,7 @@ def _clipboard_loop(
                     # next 30 s; if one never does, this was never actually
                     # an AI leak attempt, so nothing is recorded.
                     state.flag_sensitive_clipboard(
-                        detections=detections, risk_score=risk_score, content_sample=_mask(current),
+                        detections=detections, risk_score=risk_score, content_sample=safe_sample(detections),
                     )
                     logger.warning(
                         "[CLIPBOARD] No AI window active now -- "
