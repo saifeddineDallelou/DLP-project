@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { AlertTriangle, ShieldX, CheckCircle2, Flag, ClipboardList } from 'lucide-react';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -252,7 +252,221 @@ export default function Reports() {
         )}
       </div>
 
+      <ComplianceReport />
+
       <DailyReport />
+    </div>
+  );
+}
+
+// The report an auditor asks for, which neither the channel chart nor the
+// daily digest can answer: "every PCI-DSS event this period, and what was
+// done about it." Grouped by the compliance rule the violated policy carries,
+// not by channel or severity.
+function ComplianceReport() {
+  const [from, setFrom]       = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  });
+  const [to, setTo]           = useState(todayStr());
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState('');
+  const [expanded, setExpanded] = useState(null);
+
+  const load = async (f, t) => {
+    setLoading(true);
+    setError('');
+    try {
+      const { data } = await api.get(`/api/reports/compliance?from=${f}&to=${t}`);
+      setData(data);
+    } catch (e) {
+      setError(e.response?.data?.error ?? 'Could not load the compliance report');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(from, to); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const apply = () => load(from, to);
+
+  const exportCsv = () => {
+    if (!data) return;
+    // Auditors work in spreadsheets. Built client-side from data already on
+    // the page rather than adding an export endpoint that would re-run the
+    // whole query for a format the browser can produce.
+    const header = ['Rule', 'Total', 'Incidents', 'AI leak attempts', 'Blocked', 'Allowed',
+                    'Critical', 'High', 'Medium', 'Low', 'Reviews requested', 'Awaiting admin', 'Policy enabled'];
+    const rows = data.rules.map(g => [
+      g.rule, g.total, g.incidents, g.aiLeakAttempts, g.blocked, g.allowed,
+      g.bySeverity.CRITICAL, g.bySeverity.HIGH, g.bySeverity.MEDIUM, g.bySeverity.LOW,
+      g.reviewRequested, g.awaitingAdmin, g.policyEnabled ? 'yes' : 'NO',
+    ]);
+    const csv = [header, ...rows]
+      .map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dlp-compliance-${from}_to_${to}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="card mb-6">
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-ink mb-1">Compliance summary</h3>
+          <p className="text-xs text-ink-faint">
+            Events grouped by the regulation their policy enforces
+          </p>
+        </div>
+        <div className="flex items-end gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] text-ink-faint uppercase tracking-wider">From</span>
+            <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="select" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] text-ink-faint uppercase tracking-wider">To</span>
+            <input type="date" value={to} onChange={e => setTo(e.target.value)} className="select" />
+          </label>
+          <button onClick={apply} className="btn-secondary text-xs">Apply</button>
+          <button onClick={exportCsv} disabled={!data?.rules?.length} className="btn-secondary text-xs">
+            Export CSV
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="text-xs text-severity-critical-text mb-3">{error}</p>}
+
+      {loading ? (
+        <div className="flex justify-center py-10"><Spinner /></div>
+      ) : !data || data.rules.length === 0 ? (
+        <EmptyState
+          icon={ClipboardList}
+          title="No compliance policies configured"
+          sub="Rules appear here once a policy declares a complianceRule in its conditions."
+        />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            <StatCard label="Events" value={data.summary.totalEvents} />
+            <StatCard label="Rules with activity" value={data.summary.rulesWithActivity} />
+            <StatCard label="Rules covered" value={data.summary.rulesCovered} />
+            <StatCard label="Awaiting admin" value={data.summary.awaitingAdmin} />
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="th">Regulation</th>
+                  <th className="th text-right">Events</th>
+                  <th className="th text-right">Blocked</th>
+                  <th className="th">Severity</th>
+                  <th className="th text-right">Awaiting</th>
+                  <th className="th" />
+                </tr>
+              </thead>
+              <tbody>
+                {data.rules.map(g => (
+                  <Fragment key={g.rule}>
+                    <tr className="table-row">
+                      <td className="td">
+                        <span className="font-medium text-ink">{g.rule}</span>
+                        {/* Zero events because nothing happened is a very
+                            different finding from zero because nothing was
+                            watching. */}
+                        {!g.policyEnabled && (
+                          <span className="badge text-[10px] ml-2 bg-severity-high-soft text-severity-high-text">
+                            policy disabled
+                          </span>
+                        )}
+                      </td>
+                      <td className="td text-right tabular-nums text-ink">{g.total}</td>
+                      <td className="td text-right tabular-nums text-ink-soft">
+                        {g.blocked}<span className="text-ink-faint"> / {g.total}</span>
+                      </td>
+                      <td className="td">
+                        <div className="flex items-center gap-1">
+                          {['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(s => (
+                            g.bySeverity[s] > 0 && (
+                              <span key={s} className="text-[10px] tabular-nums px-1.5 py-0.5 rounded"
+                                    style={{ color: SEVERITY_HEX[s], background: `${SEVERITY_HEX[s]}22` }}>
+                                {g.bySeverity[s]} {s[0]}
+                              </span>
+                            )
+                          ))}
+                          {g.total === 0 && <span className="text-[11px] text-ink-faint">no events</span>}
+                        </div>
+                      </td>
+                      <td className="td text-right tabular-nums">
+                        {g.awaitingAdmin > 0
+                          ? <span className="text-severity-high-text">{g.awaitingAdmin}</span>
+                          : <span className="text-ink-faint">0</span>}
+                      </td>
+                      <td className="td text-right">
+                        {g.events.length > 0 && (
+                          <button
+                            onClick={() => setExpanded(expanded === g.rule ? null : g.rule)}
+                            className="text-xs text-ink-soft hover:text-ink underline underline-offset-2"
+                          >
+                            {expanded === g.rule ? 'Hide' : 'Details'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {expanded === g.rule && (
+                      <tr>
+                        <td colSpan={6} className="px-4 pb-4">
+                          <div className="rounded-lg border border-border overflow-hidden">
+                            <table className="w-full text-left text-xs">
+                              <thead>
+                                <tr className="bg-surface-elevated/50">
+                                  <th className="th text-[10px]">When</th>
+                                  <th className="th text-[10px]">Kind</th>
+                                  <th className="th text-[10px]">Channel</th>
+                                  <th className="th text-[10px]">Endpoint</th>
+                                  <th className="th text-[10px]">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {g.events.slice(0, 25).map(e => (
+                                  <tr key={e.id} className="border-t border-border">
+                                    <td className="td text-ink-faint">{formatDate(e.time)}</td>
+                                    <td className="td text-ink-soft">
+                                      {e.kind === 'AI_LEAK_ATTEMPT' ? 'AI leak' : 'Incident'}
+                                    </td>
+                                    <td className="td text-ink-soft">
+                                      {PLATFORM_LABELS[e.channel] ?? e.channel}
+                                    </td>
+                                    <td className="td text-ink-faint">{e.hostname ?? '—'}</td>
+                                    <td className="td text-ink-soft">{e.status}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {g.events.length > 25 && (
+                              <p className="text-[11px] text-ink-faint px-3 py-2">
+                                Showing 25 of {g.events.length}. Export CSV for the full set.
+                              </p>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }
