@@ -56,6 +56,10 @@ async function createPolicy(overrides = {}) {
       conditions: overrides.conditions || { patterns: ['SSN'], threshold: 1 },
       action: overrides.action || 'ALERT',
       severity: overrides.severity || 'MEDIUM',
+      // Was silently dropped: a test asking for a disabled policy got an
+      // enabled one, so any assertion about disabled behaviour passed for
+      // the wrong reason.
+      enabled: overrides.enabled ?? true,
     },
   });
 }
