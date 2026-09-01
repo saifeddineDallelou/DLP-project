@@ -81,7 +81,29 @@ router.patch('/:id/heartbeat', async (req, res, next) => {
 // DELETE /api/agents/:id  (ADMIN only)
 router.delete('/:id', authenticate, requireRole('ADMIN'), async (req, res, next) => {
   try {
+    // Read before delete: the hostname is the only human-meaningful identifier
+    // an auditor could match against, and it is gone once the row is.
+    const agent = await prisma.agent.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, hostname: true, os: true, lastSeen: true },
+    });
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
     await prisma.agent.delete({ where: { id: req.params.id } });
+
+    // Deleting an agent removes an endpoint from monitoring entirely -- the
+    // most direct way to create a blind spot, and previously unrecorded.
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.sub,
+        action: 'DELETE_AGENT',
+        resource: 'agent',
+        resourceId: agent.id,
+        ipAddress: req.ip,
+        metadata: { hostname: agent.hostname, os: agent.os, lastSeen: agent.lastSeen },
+      },
+    });
+
     res.status(204).send();
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Agent not found' });

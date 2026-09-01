@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, AlertTriangle, Shield, Monitor,
-  BarChart3, Activity, Brain, LogOut, ShieldCheck, AppWindow,
+  BarChart3, Activity, Brain, LogOut, ShieldCheck, AppWindow, ScrollText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -28,7 +28,10 @@ const NAV_GROUPS = [
   },
   {
     label: 'Analytics',
-    items: [{ to: '/reports', label: 'Reports', Icon: BarChart3 }],
+    items: [
+      { to: '/reports', label: 'Reports', Icon: BarChart3 },
+      { to: '/audit',   label: 'Audit Trail', Icon: ScrollText },
+    ],
   },
 ];
 

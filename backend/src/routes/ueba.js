@@ -64,6 +64,26 @@ router.post('/baseline', authenticate, requireRole('ADMIN', 'ANALYST'), async (r
       },
     });
 
+    // Changing a baseline redefines what counts as "normal" for this user, and
+    // therefore what will and will not raise their risk score in future. A
+    // manually entered baseline is the one way to make anomalous behaviour
+    // look unremarkable, so it needs a record of who set it.
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.sub,
+        action: 'SET_BEHAVIOR_BASELINE',
+        resource: 'user_behavior_baseline',
+        resourceId: baseline.id,
+        ipAddress: req.ip,
+        metadata: {
+          monitoredUserId: userId,
+          source: 'MANUAL',
+          avgDailyFiles: baseline.avgDailyFiles,
+          avgDailyVolumeMB: baseline.avgDailyVolumeMB,
+        },
+      },
+    });
+
     res.status(201).json(baseline);
   } catch (err) {
     next(err);
@@ -141,6 +161,29 @@ router.post('/baseline/:userId/recompute', authenticate, requireRole('ADMIN', 'A
         avgUsbFrequency: round2(usbInserts / days),
         riskScore: 0,
         lastUpdated: new Date(),
+      },
+    });
+
+    // Audited like the manual path above. A recompute is derived from real
+    // event history rather than typed in, but it still overwrites the numbers
+    // every future risk score is measured against -- and the window (`days`)
+    // is caller-chosen, so a deliberately narrow window can still be used to
+    // reshape a baseline. The metadata records what it was derived from.
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.sub,
+        action: 'RECOMPUTE_BEHAVIOR_BASELINE',
+        resource: 'user_behavior_baseline',
+        resourceId: baseline.id,
+        ipAddress: req.ip,
+        metadata: {
+          monitoredUserId: userId,
+          source: 'RECOMPUTED',
+          days,
+          eventCount: events.length,
+          avgDailyFiles: baseline.avgDailyFiles,
+          avgDailyVolumeMB: baseline.avgDailyVolumeMB,
+        },
       },
     });
 

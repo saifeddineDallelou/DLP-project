@@ -81,7 +81,7 @@ python -m pytest -q                            # 25 tests
 ### `backend/` — control plane
 
 Express API over PostgreSQL via Prisma. It owns all persistent state and all
-admin configuration. JWT auth with three roles (`ADMIN`, `ANALYST`, `USER`).
+admin configuration. JWT auth with three roles (`ADMIN`, `ANALYST`, `VIEWER`).
 
 | Route module | Purpose |
 |---|---|
@@ -94,6 +94,7 @@ admin configuration. JWT auth with three roles (`ADMIN`, `ANALYST`, `USER`).
 | `ueba.js` | Behaviour events, per-user baselines, risk scoring |
 | `classify.js` | Authenticated proxy to the classifier |
 | `reports.js` | Daily aggregate reporting |
+| `audit.js` | Read-only audit trail — filter, paginate, per-object history |
 
 ```bash
 cd backend
@@ -166,6 +167,7 @@ React + Vite + Tailwind, `recharts` for visualisation.
 | `UEBA.jsx` | Behaviour baselines and risk scores |
 | `Agents.jsx` | Enrolled endpoints |
 | `Reports.jsx` | Daily aggregates |
+| `Audit.jsx` | Audit trail of privileged actions |
 
 ```bash
 cd frontend
