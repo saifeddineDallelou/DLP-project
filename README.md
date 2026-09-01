@@ -95,6 +95,7 @@ admin configuration. JWT auth with three roles (`ADMIN`, `ANALYST`, `VIEWER`).
 | `classify.js` | Authenticated proxy to the classifier |
 | `reports.js` | Daily aggregate reporting |
 | `audit.js` | Read-only audit trail — filter, paginate, per-object history |
+| `siem.js` | SIEM forwarding status and connectivity test |
 
 ```bash
 cd backend

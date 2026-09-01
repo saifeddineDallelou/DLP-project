@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { toEvent, forwardAsync } = require('../lib/siem');
 
 const router = express.Router();
 
@@ -83,6 +84,29 @@ router.post('/attempt', async (req, res, next) => {
         throw err;
       }
     }
+
+    // An AI leak attempt has no severity of its own -- it inherits the
+    // severity of the policy it violated, so the SIEM's own alert rules key
+    // off something meaningful rather than every attempt arriving unranked.
+    const context = attempt.policyId
+      ? await prisma.policy.findUnique({
+          where: { id: attempt.policyId },
+          select: { name: true, severity: true, action: true, conditions: true },
+        })
+      : null;
+    const agentRow = await prisma.agent.findUnique({
+      where: { id: attempt.agentId },
+      select: { hostname: true },
+    });
+
+    forwardAsync(toEvent('AI_LEAK_ATTEMPT', attempt, {
+      hostname: agentRow?.hostname ?? null,
+      severity: context?.severity ?? null,
+      policyName: context?.name ?? null,
+      action: context?.action ?? null,
+      complianceRule: context?.conditions?.complianceRule ?? null,
+      raw: { platform: attempt.platform, method: attempt.method },
+    }));
 
     res.status(201).json(attempt);
   } catch (err) {

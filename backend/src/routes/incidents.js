@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { toEvent, forwardAsync } = require('../lib/siem');
 
 const router = express.Router();
 
@@ -46,9 +47,20 @@ router.post('/', async (req, res, next) => {
       },
       include: {
         agent:  { select: { id: true, hostname: true } },
-        policy: { select: { id: true, name: true } },
+        policy: { select: { id: true, name: true, conditions: true } },
       },
     });
+
+    // Fire-and-forget: an unreachable SIEM must never delay or fail an agent
+    // reporting an incident. A monitoring outage should not become a
+    // detection outage.
+    forwardAsync(toEvent('INCIDENT', incident, {
+      hostname: incident.agent?.hostname,
+      policyName: incident.policy?.name,
+      complianceRule: incident.policy?.conditions?.complianceRule ?? null,
+      // Bytes on the model; a SIEM wants text. Already masked upstream.
+      raw: { evidenceType: incident.evidenceType, status: incident.status },
+    }));
 
     res.status(201).json(incident);
   } catch (err) {
