@@ -187,7 +187,7 @@ User ──assigned──► Incident ◄──── Agent ────► Beha
 
 | Model | Holds |
 |---|---|
-| `User` | Dashboard accounts. Roles: `ADMIN`, `ANALYST`, `USER` |
+| `User` | Dashboard accounts. Roles: `ADMIN`, `ANALYST`, `VIEWER` |
 | `Policy` | `conditions` JSON, `action`, `severity`, `enabled`, `version` |
 | `AppRule` | Restricted-app keyword + label. Standalone by design |
 | `Agent` | Enrolled endpoint, `token`, `lastSeen` heartbeat |
@@ -210,6 +210,27 @@ never blocks an app from launching, only from touching a protected file.
 A worker who is blocked may *request* a review with a short note
 (`review_prompt.py`); only an `ADMIN` or `ANALYST` decides the outcome. There is
 deliberately no self-service unblock path.
+
+This is a considered divergence from commercial DLP, not a missing feature.
+Microsoft Purview, Forcepoint and most enterprise suites ship *block with
+override*: the user types a business justification and proceeds anyway, with
+the override recorded. That design optimises for a real problem — false
+positives creating friction at scale, in organisations where a blocked
+executive escalates within minutes.
+
+This project optimises for the opposite property. An override path is only as
+strong as the user's incentive not to use it, and the single most likely person
+to click through a block is precisely the person deliberately exfiltrating data.
+The migration history records the change of mind explicitly: an `overridden`
+column was added, then renamed to `review_requested`
+(`20260831171700_rename_override_to_review_request`) once the block became
+silent and final.
+
+The cost is accepted openly: a false positive here blocks a legitimate worker
+until an admin acts, where a commercial product would let them proceed. If this
+were deployed at organisational scale, `Policy.allowOverride` — override enabled
+per-policy rather than globally — is the natural way to reintroduce it without
+weakening the high-severity rules.
 
 ---
 

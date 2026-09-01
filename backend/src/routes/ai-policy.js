@@ -164,6 +164,26 @@ router.patch('/attempt/:id', authenticate, requireRole('ADMIN', 'ANALYST'), asyn
     if (adminNote !== undefined) data.adminNote = adminNote;
 
     const attempt = await prisma.aiLeakAttempt.update({ where: { id: req.params.id }, data });
+
+    // Adjudicating a blocked leak is one of the most consequential actions in
+    // the system -- it is an admin recording a disposition on an attempt the
+    // agent already blocked. It was previously the only role-guarded write
+    // that left no trace.
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.sub,
+        action: 'ADJUDICATE_AI_LEAK_ATTEMPT',
+        resource: 'ai_leak_attempt',
+        resourceId: attempt.id,
+        ipAddress: req.ip,
+        metadata: {
+          platform: attempt.platform,
+          reviewRequested: attempt.reviewRequested,
+          adminNote: adminNote ?? null,
+        },
+      },
+    });
+
     res.json(attempt);
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Attempt not found' });

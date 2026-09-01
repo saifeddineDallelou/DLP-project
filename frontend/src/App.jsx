@@ -7,6 +7,7 @@ import Incidents     from './pages/Incidents.jsx';
 import Policies      from './pages/Policies.jsx';
 import Agents        from './pages/Agents.jsx';
 import Reports       from './pages/Reports.jsx';
+import Audit         from './pages/Audit.jsx';
 import UEBA          from './pages/UEBA.jsx';
 import AiPolicy      from './pages/AiPolicy.jsx';
 import AppRules      from './pages/AppRules.jsx';
@@ -29,6 +30,7 @@ export default function App() {
       <Route path="/policies"   element={<ProtectedLayout><Policies  /></ProtectedLayout>} />
       <Route path="/agents"     element={<ProtectedLayout><Agents    /></ProtectedLayout>} />
       <Route path="/reports"    element={<ProtectedLayout><Reports   /></ProtectedLayout>} />
+      <Route path="/audit"      element={<ProtectedLayout><Audit     /></ProtectedLayout>} />
       <Route path="/ueba"       element={<ProtectedLayout><UEBA      /></ProtectedLayout>} />
       <Route path="/ai-policy"  element={<ProtectedLayout><AiPolicy  /></ProtectedLayout>} />
       <Route path="/app-rules"  element={<ProtectedLayout><AppRules /></ProtectedLayout>} />
