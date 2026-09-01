@@ -129,9 +129,15 @@ describe('POST /api/ueba/baseline/:userId/recompute', () => {
       .set('Authorization', authHeader(analyst));
 
     expect(res.status).toBe(200);
-    expect(res.body.avgDailyFiles).toBeCloseTo(3.0, 3);   // (20 + 10 files) / 10 days
-    expect(res.body.avgUsbFrequency).toBeCloseTo(0.1, 3); // 1 insert / 10 days
+    // Median across ACTIVE days, not sum/window. All three events land on the
+    // same calendar day, so there is one active day holding 20 + 10 = 30 files
+    // and 1 USB insert, and the median of a single value is that value.
+    // Previously this was 30/10 = 3.0, which described a day the user never had.
+    expect(res.body.avgDailyFiles).toBeCloseTo(30, 3);
+    expect(res.body.avgUsbFrequency).toBeCloseTo(1, 3);
     expect(res.body.computedFrom.eventCount).toBe(3);
+    expect(res.body.computedFrom.activeDays).toBe(1);
+    expect(res.body.computedFrom.statistic).toBe('median-across-active-days');
   });
 
   test('derives working hours from the 10th/90th percentile of observed activity', async () => {
@@ -168,7 +174,7 @@ describe('POST /api/ueba/baseline/:userId/recompute', () => {
       .set('Authorization', authHeader(analyst));
 
     expect(res.status).toBe(200);
-    expect(res.body.avgDailyVolumeMB).toBeCloseTo(2.0, 3); // 20 MB / 10 days
+    expect(res.body.avgDailyVolumeMB).toBeCloseTo(20, 3); // one active day holding 20 MB
   });
 
   test('includes LARGE_FILE_TRANSFER volume without double-counting FILE_ACCESS', async () => {
@@ -187,7 +193,7 @@ describe('POST /api/ueba/baseline/:userId/recompute', () => {
       .set('Authorization', authHeader(analyst));
 
     expect(res.status).toBe(200);
-    expect(res.body.avgDailyVolumeMB).toBeCloseTo(17.0, 3); // (20 + 150) MB / 10 days
+    expect(res.body.avgDailyVolumeMB).toBeCloseTo(170, 3); // one active day holding 20 + 150 MB
     expect(res.body.computedFrom.largeFileTransfers).toBe(1);
   });
 });
@@ -256,10 +262,21 @@ describe('GET /api/ueba/risk-score/:userId', () => {
       .set('Authorization', authHeader(user));
 
     expect(res.status).toBe(200);
-    // 0.2 base + 0.1 (1 after-hours) + 0.05 (1 usb) = 0.35
-    expect(res.body.liveRiskScore).toBeCloseTo(0.35, 3);
-    expect(res.body.riskLevel).toBe('LOW');
+    // Neither event carries file/volume metadata, so volume and files sit at
+    // zero. The USB insert IS a deviation -- this baseline says the user never
+    // uses USB -- but a zero baseline is capped at 0.6, so it cannot decide the
+    // score alone: 0.6 x 0.75 dominant floor = 0.45, plus the event bonus
+    // (after-hours 0.05 + usb 0.02) = 0.52.
+    //
+    // MEDIUM is the right answer here. Someone who has never used a USB stick
+    // using one after hours is worth a look; it is not on its own a HIGH
+    // finding, and treating it as one manufactures false positives on every
+    // new starter.
+    expect(res.body.liveRiskScore).toBeCloseTo(0.52, 3);
+    expect(res.body.riskLevel).toBe('MEDIUM');
     expect(res.body.baselineExists).toBe(true);
+    expect(res.body.components.usb.signal).toBeCloseTo(0.6, 3);
+    expect(res.body.components.volume.signal).toBe(0);
   });
 
   test('large file transfers contribute to the live risk score', async () => {
@@ -281,8 +298,16 @@ describe('GET /api/ueba/risk-score/:userId', () => {
       .set('Authorization', authHeader(user));
 
     expect(res.status).toBe(200);
-    // 0.2 base + 0.15 (1 large file transfer) = 0.35
-    expect(res.body.liveRiskScore).toBeCloseTo(0.35, 3);
+    // 150 MB against a 5 MB baseline is 30x normal -- far past the 5x full-signal
+    // point, so volume contributes its full 0.35 weight. Under the old formula
+    // this scored 0.35 regardless of size; a 5 MB transfer and a 150 MB one
+    // were indistinguishable.
+    expect(res.body.components.volume.ratio).toBeCloseTo(30, 1);
+    expect(res.body.components.volume.signal).toBe(1);
+    // Volume alone is fully anomalous, so the dominant-signal floor carries it
+    // to 0.75, plus the 0.08 large-transfer event bonus = 0.83 -> HIGH.
+    expect(res.body.liveRiskScore).toBeCloseTo(0.83, 3);
+    expect(res.body.riskLevel).toBe('HIGH');
     expect(res.body.last24h.largeFileTransfers).toBe(1);
   });
 

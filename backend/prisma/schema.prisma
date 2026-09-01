@@ -130,6 +130,12 @@ model UserBehaviorBaseline {
   // User.id (a dashboard login account). A SOC analyst's dashboard account
   // and the employees they monitor are typically different people.
   userId               String   @unique @map("user_id")
+  // Peer group for relative scoring. Nullable because the agent reports a
+  // Windows username and has no idea what team that person is on -- it is
+  // admin-declared, not discovered. A user with no department is scored
+  // self-relative only, which is exactly the behaviour before this field
+  // existed, so an unpopulated deployment degrades rather than breaks.
+  department           String?
   avgDailyFiles        Float    @map("avg_daily_files")
   avgDailyVolumeMB     Float    @map("avg_daily_volume_mb")
   avgWorkingHourStart  Int      @map("avg_working_hour_start")

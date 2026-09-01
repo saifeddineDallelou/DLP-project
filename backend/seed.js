@@ -73,6 +73,7 @@ async function seed() {
     update: {},
     create: {
       userId:               admin.id,
+      department:           'Engineering',
       avgDailyFiles:        120,
       avgDailyVolumeMB:     45.5,
       avgWorkingHourStart:  8,
@@ -83,6 +84,34 @@ async function seed() {
     },
   });
   console.log(`  baseline     : riskScore=${baseline.riskScore}  user=${admin.email}`);
+
+  // Peer baselines. Peer-relative scoring needs at least two OTHER members of
+  // a department to have a median worth comparing against, so a single seeded
+  // baseline would leave that half of the scoring untestable.
+  const peers = [
+    { userId: 'eng-peer-01', department: 'Engineering', files: 140, volume: 60,  usb: 0.1 },
+    { userId: 'eng-peer-02', department: 'Engineering', files: 95,  volume: 38,  usb: 0.3 },
+    { userId: 'fin-peer-01', department: 'Finance',     files: 22,  volume: 8,   usb: 0   },
+    { userId: 'fin-peer-02', department: 'Finance',     files: 18,  volume: 11,  usb: 0   },
+  ];
+  for (const p of peers) {
+    await prisma.userBehaviorBaseline.upsert({
+      where:  { userId: p.userId },
+      update: {},
+      create: {
+        userId:              p.userId,
+        department:          p.department,
+        avgDailyFiles:       p.files,
+        avgDailyVolumeMB:    p.volume,
+        avgWorkingHourStart: 9,
+        avgWorkingHourEnd:   18,
+        avgUsbFrequency:     p.usb,
+        riskScore:           0,
+        lastUpdated:         new Date(),
+      },
+    });
+  }
+  console.log(`  peers        : ${peers.length} baselines across Engineering / Finance`);
 
   // ── Behavior events ─────────────────────────────────────────────────────────
   const event1 = await prisma.behaviorEvent.upsert({

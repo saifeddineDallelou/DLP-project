@@ -174,6 +174,59 @@ in `file_dialog_monitor.py`, which never touches the clipboard or a dialog.
 
 ---
 
+## 5a. UEBA scoring
+
+Two endpoints with distinct jobs, frequently confused:
+
+| | `POST /baseline/:userId/recompute` | `GET /risk-score/:userId` |
+|---|---|---|
+| Reads | last 30 days | last 24 hours |
+| Produces | the baseline | a score, and why |
+| Judges | nothing | everything |
+
+**Recompute builds the ruler.** It takes the user's recorded `BehaviorEvent`
+history, buckets it per calendar day, and stores the **median across active
+days** — files touched, volume moved, USB inserts — plus 10th/90th-percentile
+working hours.
+
+Two deliberate choices there. *Median, not mean*: one 8 GB afternoon would
+otherwise shift the number every subsequent day is judged against. *Active days
+only*: padding with weekends and leave drags every baseline toward zero and
+makes an ordinary Monday look anomalous.
+
+**Risk score does the measuring.** Each metric becomes a ratio of today against
+that baseline, converted to a 0–1 signal that saturates at
+`FULL_SIGNAL_RATIO` (5× normal), then weighted — volume 35%, files 25%, hours
+20%, USB 20%.
+
+Two properties are worth stating, because they are not what a plain weighted
+mean would give you:
+
+*A single fully anomalous metric is sufficient.* Exfiltration is
+characteristically narrow and deep — one metric wildly abnormal, the rest
+ordinary. A weighted mean demands *breadth* of anomaly, so a user moving 80×
+their usual volume could not reach HIGH while their working hours stayed
+normal. `DOMINANT_SIGNAL_FACTOR` sets the floor a single maxed metric scores on
+its own (0.75, which clears HIGH unaided).
+
+*A zero baseline is capped below full signal.* "Has not done this during the
+window" is weaker evidence than a measured ratio, so novel behaviour raises the
+score without deciding it — otherwise a new starter's first USB insert would
+alone be a HIGH finding.
+
+**Peer groups** are the defence against a poisoned baseline. Whoever controls
+the baseline controls whether UEBA ever fires: a recompute over a deliberately
+narrow window makes that day's behaviour the new normal, silently disabling
+detection for one person with no trace anywhere else in the system — which is
+why `RECOMPUTE_BEHAVIOR_BASELINE` records its `days` window in the audit trail.
+Where a `department` is declared, each metric takes `max(self, peer)`, so a
+corrupted self-baseline is still caught by a peer median that did not move.
+Max rather than a blend precisely because blending lets the corrupted half drag
+the result back down. A user with no department is scored self-relative only.
+
+The known limit: peer groups are admin-declared, not discovered. The agent
+reports a Windows username and has no idea what team that person is on.
+
 ## 6. Data model
 
 ```
@@ -194,7 +247,7 @@ User ──assigned──► Incident ◄──── Agent ────► Beha
 | `Incident` | A violation: channel, severity, masked `evidence`, `riskScore` |
 | `AiLeakAttempt` | An AI-platform leak: `platform`, `method`, `blocked` |
 | `BehaviorEvent` | Raw UEBA signal from an endpoint |
-| `UserBehaviorBaseline` | Per-user normal, for deviation scoring |
+| `UserBehaviorBaseline` | Per-user normal, plus an optional `department` peer group |
 | `AuditLog` | Admin action trail |
 
 Two design notes:
