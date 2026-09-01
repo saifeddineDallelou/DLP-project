@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Activity, RefreshCw, TrendingUp, User } from 'lucide-react';
+import { Activity, RefreshCw, TrendingUp, User, Calculator } from 'lucide-react';
 import api from '../services/api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -8,7 +8,7 @@ import RiskBar from '../components/RiskBar.jsx';
 import EventMetadata from '../components/EventMetadata.jsx';
 import { formatDate, EVENT_TYPE_LABELS, RISK_LEVEL_TONES } from '../utils/format.js';
 
-function RiskProfileCard({ profile }) {
+function RiskProfileCard({ profile, onRecompute, recomputing }) {
   const tone = RISK_LEVEL_TONES[profile.riskLevel] ?? RISK_LEVEL_TONES.LOW;
   return (
     <div className="card">
@@ -38,7 +38,7 @@ function RiskProfileCard({ profile }) {
              style={{ width: `${Math.round(profile.liveRiskScore * 100)}%` }} />
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-center pt-2 border-t border-border">
+      <div className="grid grid-cols-4 gap-2 text-center pt-2 border-t border-border">
         <div>
           <p className="text-xs font-semibold text-ink tabular-nums">{profile.baselineRiskScore.toFixed(2)}</p>
           <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">Baseline</p>
@@ -51,7 +51,43 @@ function RiskProfileCard({ profile }) {
           <p className="text-xs font-semibold text-ink tabular-nums">{profile.last24h.usbInserts}</p>
           <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">USB</p>
         </div>
+        <div>
+          <p className="text-xs font-semibold text-ink tabular-nums">{profile.last24h.largeFileTransfers}</p>
+          <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">Large files</p>
+        </div>
       </div>
+
+      {profile.baseline && (
+        <div className="grid grid-cols-4 gap-2 text-center pt-2 mt-2 border-t border-border">
+          <div>
+            <p className="text-xs font-semibold text-ink tabular-nums">{profile.baseline.avgDailyFiles}</p>
+            <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">Files/day</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-ink tabular-nums">{profile.baseline.avgDailyVolumeMB}</p>
+            <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">MB/day</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-ink tabular-nums">
+              {profile.baseline.avgWorkingHourStart}–{profile.baseline.avgWorkingHourEnd}h
+            </p>
+            <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">Active hours</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-ink tabular-nums">{profile.baseline.avgUsbFrequency}</p>
+            <p className="text-[9px] text-ink-faint uppercase tracking-wide mt-0.5">USB/day</p>
+          </div>
+        </div>
+      )}
+
+      <button
+        className="btn-secondary text-[11px] w-full mt-3 py-1.5"
+        disabled={recomputing}
+        onClick={() => onRecompute(profile.userId)}
+        title="Recompute avgDailyFiles / working hours / USB frequency from this user's actual event history"
+      >
+        <Calculator size={12} /> {recomputing ? 'Recomputing…' : 'Recompute baseline from history'}
+      </button>
     </div>
   );
 }
@@ -63,6 +99,7 @@ export default function UEBA() {
   const [loading, setLoading]   = useState(true);
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [filter, setFilter]     = useState('');
+  const [recomputingId, setRecomputingId] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -94,6 +131,18 @@ export default function UEBA() {
 
   useEffect(() => { load(); }, [load]);
 
+  const recompute = async (userId) => {
+    setRecomputingId(userId);
+    try {
+      await api.post(`/api/ueba/baseline/${userId}/recompute`);
+      await load();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRecomputingId(null);
+    }
+  };
+
   const displayed = filter
     ? events.filter(e => e.eventType === filter || e.userId?.includes(filter))
     : events;
@@ -121,7 +170,14 @@ export default function UEBA() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {profiles.map((p) => <RiskProfileCard key={p.userId} profile={p} />)}
+            {profiles.map((p) => (
+              <RiskProfileCard
+                key={p.userId}
+                profile={p}
+                onRecompute={recompute}
+                recomputing={recomputingId === p.userId}
+              />
+            ))}
           </div>
         )}
       </div>

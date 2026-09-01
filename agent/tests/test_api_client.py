@@ -106,6 +106,38 @@ class TestDLPApiClient:
         assert args[1] == "http://backend/api/ai-policy/attempt"
         assert kwargs["headers"] == {"x-agent-token": "tok"}
         assert kwargs["json"]["blocked"] is True
+        assert kwargs["json"]["policyId"] is None
+
+    @patch("api_client._request")
+    def test_report_ai_leak_attempt_sends_policy_id(self, mock_request):
+        client = DLPApiClient("http://backend", "http://classifier", agent_token="tok")
+        client.report_ai_leak_attempt(
+            agent_id="a1", platform="ANTHROPIC_CLAUDE", method="CLIPBOARD",
+            content_sample="x", risk_score=0.9, policy_id="pci-1",
+        )
+        _, kwargs = mock_request.call_args
+        assert kwargs["json"]["policyId"] == "pci-1"
+
+    @patch("api_client._request")
+    def test_request_review_ai_leak_attempt_uses_patch_method(self, mock_request):
+        client = DLPApiClient("http://backend", "http://classifier", agent_token="tok")
+        client.request_review_ai_leak_attempt("attempt-1", "Looked like a false positive")
+
+        args, kwargs = mock_request.call_args
+        assert args[0] == "PATCH"
+        assert args[1] == "http://backend/api/ai-policy/attempt/attempt-1/request-review"
+        assert kwargs["json"] == {"note": "Looked like a false positive"}
+        assert kwargs["headers"] == {"x-agent-token": "tok"}
+
+    @patch("api_client._request")
+    def test_request_review_incident_uses_patch_method(self, mock_request):
+        client = DLPApiClient("http://backend", "http://classifier", agent_token="tok")
+        client.request_review_incident("inc-1", None)
+
+        args, kwargs = mock_request.call_args
+        assert args[0] == "PATCH"
+        assert args[1] == "http://backend/api/incidents/inc-1/request-review"
+        assert kwargs["json"] == {"note": None}
 
     @patch("api_client._request")
     def test_heartbeat_uses_patch_method(self, mock_request):
@@ -126,3 +158,15 @@ class TestDLPApiClient:
         assert args[1] == "http://backend/api/policies"
         assert kwargs["headers"] == {"x-agent-token": "tok"}
         assert result == [{"id": "p1", "name": "PII"}]
+
+    @patch("api_client._request")
+    def test_list_app_rules_uses_get_method(self, mock_request):
+        mock_request.return_value = [{"keyword": "teamviewer", "label": "TeamViewer"}]
+        client = DLPApiClient("http://backend", "http://classifier", agent_token="tok")
+        result = client.list_app_rules()
+
+        args, kwargs = mock_request.call_args
+        assert args[0] == "GET"
+        assert args[1] == "http://backend/api/app-rules"
+        assert kwargs["headers"] == {"x-agent-token": "tok"}
+        assert result == [{"keyword": "teamviewer", "label": "TeamViewer"}]

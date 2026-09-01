@@ -17,7 +17,6 @@ model User {
   updatedAt        DateTime              @updatedAt @map("updated_at")
   auditLogs        AuditLog[]
   incidents        Incident[]            @relation("AssignedIncidents")
-  behaviorBaseline UserBehaviorBaseline?
 
   @@map("users")
 }
@@ -34,8 +33,28 @@ model Policy {
   createdAt   DateTime   @default(now()) @map("created_at")
   updatedAt   DateTime   @updatedAt @map("updated_at")
   incidents   Incident[]
+  aiLeakAttempts AiLeakAttempt[]
 
   @@map("policies")
+}
+
+// Admin-configurable "restricted apps" list -- matched against a foreground
+// window title / process name the same way the AI-platform table is, but
+// the presence of a restricted app is NOT itself a violation (the app runs
+// normally otherwise): it only matters as an additional risky-destination
+// signal when sensitive content is about to touch it (clipboard copy, file
+// pick, ...), mirroring Microsoft Purview Endpoint DLP's "Restricted apps"
+// list, which likewise never blocks the app from launching -- only from
+// accessing a DLP-protected file.
+model AppRule {
+  id        String   @id @default(uuid())
+  keyword   String   @unique
+  label     String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_rules")
 }
 
 model Agent {
@@ -68,6 +87,16 @@ model Incident {
   resolvedAt   DateTime?      @map("resolved_at")
   createdAt    DateTime       @default(now()) @map("created_at")
   updatedAt    DateTime       @updatedAt @map("updated_at")
+  // The block is silent for the end user -- no popup lets them self-restore
+  // the content. They can only flag the block for an admin to look at, with
+  // an optional short note explaining why (reviewRequested/justification).
+  // The admin's own explanation after reviewing goes in adminNote -- a
+  // separate field because it's a different author and a different purpose
+  // (the worker explains their intent in the moment; the admin records the
+  // disposition after investigating).
+  reviewRequested Boolean @default(false) @map("review_requested")
+  justification   String?
+  adminNote       String? @map("admin_note")
 
   agent      Agent  @relation(fields: [agentId], references: [id])
   policy     Policy @relation(fields: [policyId], references: [id])
@@ -95,6 +124,11 @@ model AuditLog {
 
 model UserBehaviorBaseline {
   id                   String   @id @default(uuid())
+  // Free string, NOT a foreign key to User -- this identifies the MONITORED
+  // person (whatever identity the agent reports for BehaviorEvent.userId,
+  // e.g. a Windows username), which is a different identity space from
+  // User.id (a dashboard login account). A SOC analyst's dashboard account
+  // and the employees they monitor are typically different people.
   userId               String   @unique @map("user_id")
   avgDailyFiles        Float    @map("avg_daily_files")
   avgDailyVolumeMB     Float    @map("avg_daily_volume_mb")
@@ -103,8 +137,6 @@ model UserBehaviorBaseline {
   avgUsbFrequency      Float    @map("avg_usb_frequency")
   riskScore            Float    @default(0) @map("risk_score")
   lastUpdated          DateTime @map("last_updated")
-
-  user User @relation(fields: [userId], references: [id])
 
   @@map("user_behavior_baselines")
 }
@@ -127,14 +159,20 @@ model BehaviorEvent {
 model AiLeakAttempt {
   id            String    @id @default(uuid())
   agentId       String    @map("agent_id")
+  policyId      String?   @map("policy_id")
   platform      AiPlatform
   method        LeakMethod
   contentSample String?   @map("content_sample")
   riskScore     Float     @map("risk_score")
   blocked       Boolean   @default(true)
   timestamp     DateTime  @default(now())
+  // See the matching fields on Incident for the reasoning.
+  reviewRequested Boolean @default(false) @map("review_requested")
+  justification   String?
+  adminNote       String? @map("admin_note")
 
-  agent Agent @relation(fields: [agentId], references: [id])
+  agent  Agent   @relation(fields: [agentId], references: [id])
+  policy Policy? @relation(fields: [policyId], references: [id])
 
   @@map("ai_leak_attempts")
 }
@@ -190,6 +228,7 @@ enum BehaviorEventType {
   SCREENSHOT
   APP_LAUNCH
   AFTER_HOURS_ACCESS
+  LARGE_FILE_TRANSFER
 }
 
 enum AiPlatform {

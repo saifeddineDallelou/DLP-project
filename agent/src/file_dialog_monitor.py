@@ -52,6 +52,7 @@ from ai_domain_monitor import (
     _detect_platform_via_address_bar,
 )
 from file_extractor import extract
+from quarantine import quarantine_file
 
 # Matches a Windows absolute path (drive-letter or UNC) anywhere in a string --
 # used to pull the current folder out of the dialog's address-bar accessible
@@ -422,9 +423,16 @@ def _dialog_monitor_loop(
                 )
                 if blocked:
                     _close_dialog(hwnd)
+                if action == "QUARANTINE":
+                    # Cancelling the dialog only stops THIS pick -- the file
+                    # is still sitting right there to attach again a moment
+                    # later. QUARANTINE's distinct behavior is removing it
+                    # from disk entirely.
+                    quarantine_file(path)
 
                 attempt = client.report_ai_leak_attempt(
                     agent_id=agent_id,
+                    policy_id=policy.get("id"),
                     platform=platform,
                     method="BROWSER",
                     content_sample=f"FILE:{filename}"[:100],

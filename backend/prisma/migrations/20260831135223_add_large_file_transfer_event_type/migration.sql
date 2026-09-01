@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "BehaviorEventType" ADD VALUE 'LARGE_FILE_TRANSFER';

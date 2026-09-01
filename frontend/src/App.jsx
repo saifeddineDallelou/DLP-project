@@ -9,6 +9,7 @@ import Agents        from './pages/Agents.jsx';
 import Reports       from './pages/Reports.jsx';
 import UEBA          from './pages/UEBA.jsx';
 import AiPolicy      from './pages/AiPolicy.jsx';
+import AppRules      from './pages/AppRules.jsx';
 
 function ProtectedLayout({ children }) {
   return (
@@ -30,6 +31,7 @@ export default function App() {
       <Route path="/reports"    element={<ProtectedLayout><Reports   /></ProtectedLayout>} />
       <Route path="/ueba"       element={<ProtectedLayout><UEBA      /></ProtectedLayout>} />
       <Route path="/ai-policy"  element={<ProtectedLayout><AiPolicy  /></ProtectedLayout>} />
+      <Route path="/app-rules"  element={<ProtectedLayout><AppRules /></ProtectedLayout>} />
 
       {/* Catch-all → dashboard */}
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

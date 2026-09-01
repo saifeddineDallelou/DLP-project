@@ -24,6 +24,7 @@ from pywinauto import Desktop
 
 from api_client  import DLPApiClient
 from agent_state import AgentState
+from review_prompt import prompt_review_request
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
 
@@ -217,19 +218,46 @@ def _detect_platform_in_text(text: str) -> str | None:
     return None
 
 
-def _scan_processes_raw() -> tuple[str | None, str]:
+def _scan_processes_raw() -> list[tuple[int, str, str]]:
+    """
+    Return (pid, name, platform) for every RUNNING process whose name matches
+    an AI-platform keyword. This alone is NOT enough to conclude that
+    platform is actually in use -- a name match on a headless background/
+    helper process (e.g. this very dev machine runs Claude Code's own
+    subprocesses, all named "claude") is a false positive. _detect_platform()
+    cross-references this against processes that actually own a visible
+    window before treating a match as real.
+    """
+    matches: list[tuple[int, str, str]] = []
     try:
-        for proc in psutil.process_iter(["name"]):
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
                 name = (proc.info.get("name") or "").lower().replace(".exe", "")
                 for keyword, plat in _PROCESS_KEYWORDS:
                     if keyword in name:
-                        return plat, name
+                        matches.append((proc.info["pid"], name, plat))
+                        break
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
     except Exception as exc:
         logger.debug(f"[AI-MONITOR] psutil error: {exc}")
-    return None, ""
+    return matches
+
+
+def _window_owner_pids(windows: list[tuple[int, str]]) -> set[int]:
+    """PIDs that own at least one visible, titled top-level window (i.e. a
+    real desktop app the user could actually be looking at), as opposed to a
+    headless background/helper process."""
+    pids: set[int] = set()
+    for hwnd, _title in windows:
+        pid = ctypes.wintypes.DWORD()
+        try:
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value:
+                pids.add(pid.value)
+        except Exception:
+            pass
+    return pids
 
 
 # ── AiBlocker — shared between ai_domain_monitor loop and clipboard_watcher ──
@@ -251,9 +279,14 @@ class AiBlocker:
         self._policy_resolver = policy_resolver
         self._lock            = threading.Lock()
 
-        # Cooldown state
-        self._last_clip_clear: float         = 0.0
-        self._last_alerted: dict[str, float] = {}
+        # Cooldown state -- keyed per-platform (not a single shared timer) so
+        # a block on one AI platform can't suppress a block on a different
+        # one detected moments later (e.g. paste into Grok, then Gemini 3s
+        # later -- each is its own leak attempt and must be independently
+        # evaluated/cleared, not silently let through by an unrelated
+        # platform's still-cooling-down clear timer).
+        self._last_clip_clear: dict[str, float] = {}
+        self._last_alerted: dict[str, float]    = {}
 
         # Process scan cache shared between the two threads
         self._proc_cache: tuple[str | None, str] = (None, "")
@@ -312,9 +345,18 @@ class AiBlocker:
                 self._proc_cache_time = now
             cached = self._proc_cache
 
-        plat, name = cached
-        if plat:
-            return plat, f"process={name}"
+        if cached:
+            # A name match alone isn't enough -- require the process to also
+            # own a visible window, so a headless background/helper process
+            # with a coincidentally matching name (e.g. Claude Code's own
+            # subprocesses) can't be mistaken for the AI platform actually
+            # in use. windows was already enumerated above (tier 1), so this
+            # costs nothing extra.
+            visible_pids = _window_owner_pids(windows)
+            for pid, name, plat in cached:
+                if pid in visible_pids:
+                    return plat, f"process={name}"
+
         return None, ""
 
     # ── Public interface ──────────────────────────────────────────────────────
@@ -377,14 +419,14 @@ class AiBlocker:
 
         now = time.monotonic()
 
-        # ── STEP 1: clear clipboard (5 s cooldown) -- skipped for ALERT ───────
+        # ── STEP 1: clear clipboard (5 s cooldown, per-platform) -- skipped for ALERT ───
         do_clear = False
         if action != "ALERT":
             with self._lock:
-                since_clear = now - self._last_clip_clear
+                since_clear = now - self._last_clip_clear.get(detected_plat, 0.0)
                 do_clear    = since_clear >= _CLIP_CLEAR_COOLDOWN
                 if do_clear:
-                    self._last_clip_clear = now
+                    self._last_clip_clear[detected_plat] = now
 
             if do_clear:
                 try:
@@ -409,12 +451,19 @@ class AiBlocker:
                 self._last_alerted[detected_plat] = now
 
         if do_alert:
+            if do_clear:
+                status_word = "BLOCKED"
+            elif action == "ALERT":
+                status_word = "DETECTED (ALERT-only policy)"
+            else:
+                status_word = "DETECTED (NOT cleared -- clear cooldown active)"
             logger.critical(
-                f"[AI-MONITOR] !! DATA LEAK {'BLOCKED' if do_clear else 'DETECTED (ALERT only)'} -- "
+                f"[AI-MONITOR] !! DATA LEAK {status_word} -- "
                 f"{detected_plat} | {detected_source} | via={source_tag}"
             )
             attempt = self._client.report_ai_leak_attempt(
                 agent_id=self._agent_id,
+                policy_id=policy.get("id"),
                 platform=detected_plat,
                 method="BROWSER",
                 content_sample=(content_sample or detected_source)[:100],
@@ -426,10 +475,37 @@ class AiBlocker:
                     f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
                     f"status={'BLOCKED' if do_clear else 'ALERTED'}"
                 )
+                if do_clear and attempt.get("id"):
+                    self._offer_review_request(attempt["id"], policy, detected_plat)
             else:
                 logger.error("[AI-MONITOR] Failed to report incident to backend")
 
         return action
+
+    def _offer_review_request(self, attempt_id: str, policy: dict, detected_plat: str) -> None:
+        """
+        Show the block notification in its own thread -- never on the calling
+        thread, so the clipboard clear/report above (already done by the time
+        this is called) is never delayed by waiting on the user. This never
+        restores or unblocks anything -- it only lets the user flag the block
+        for an admin to review, with an optional note.
+        """
+        def _run() -> None:
+            reason = (
+                f"Policy '{policy.get('name') or 'default'}' blocked a paste "
+                f"detected near {detected_plat}."
+            )
+            note = prompt_review_request(reason)
+            if note is None:
+                return
+
+            result = self._client.request_review_ai_leak_attempt(attempt_id, note or None)
+            if result:
+                logger.success(f"[AI-MONITOR] Review requested  id={attempt_id}")
+            else:
+                logger.error("[AI-MONITOR] Failed to record review request to backend")
+
+        threading.Thread(target=_run, daemon=True, name="review-prompt").start()
 
 
 # ── Background poll loop (handles the DELAYED case) ──────────────────────────
@@ -456,12 +532,13 @@ def _ai_monitor_loop(
         # Only do expensive detection if clipboard was recently flagged
         if state.clipboard_flagged_recently(within_seconds=30.0):
             t_flagged = state.sensitive_clip_monotonic()
-            # No detections available for the delayed path (the original
-            # classify() result isn't carried in AgentState's flag) -- falls
-            # back to the default policy's action.
+            ctx = state.sensitive_clip_context()
             action_taken = blocker.check_and_block(
                 t_detect=t_flagged,
+                content_sample=ctx.get("content_sample") or "",
+                risk_score=ctx.get("risk_score") or 0.95,
                 source_tag="CLIPBOARD_DELAYED",
+                detections=ctx.get("detections"),
             )
             if action_taken:
                 logger.info(

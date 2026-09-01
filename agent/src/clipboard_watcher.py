@@ -21,8 +21,11 @@ from loguru import logger
 
 from api_client      import DLPApiClient
 from agent_state     import AgentState
-from ai_domain_monitor import AiBlocker
+from ai_domain_monitor import AiBlocker, _get_foreground_title
 from file_extractor  import extract
+from file_watcher    import _risk_to_severity
+from quarantine      import quarantine_file
+from review_prompt   import prompt_review_request
 
 _POLL_INTERVAL   = 0.3    # seconds between polls (down from 2 s)
 _MAX_CLASSIFY    = 5_000  # max chars sent to classifier
@@ -39,6 +42,84 @@ def _mask(text: str) -> str:
     if len(t) > 30:
         return t[:15] + "***[MASKED]***" + t[-5:]
     return t
+
+
+def _offer_incident_review_request(client: DLPApiClient, incident_id: str, label: str) -> None:
+    """Same block-notification pattern as AiBlocker._offer_review_request,
+    for the restricted-app path's Incident records instead of AiLeakAttempt
+    ones. Never restores or unblocks anything -- only flags for admin review."""
+    def _run() -> None:
+        note = prompt_review_request(f"A restricted app ('{label}') was active when this was blocked.")
+        if note is None:
+            return
+
+        result = client.request_review_incident(incident_id, note or None)
+        if result:
+            logger.success(f"[CLIPBOARD] Review requested  id={incident_id}")
+        else:
+            logger.error("[CLIPBOARD] Failed to record review request to backend")
+
+    threading.Thread(target=_run, daemon=True, name="review-prompt").start()
+
+
+def _check_restricted_app(
+    client: DLPApiClient,
+    agent_id: str,
+    app_rule_resolver,
+    policy_resolver,
+    detections: list,
+    risk_score: float,
+) -> str | None:
+    """
+    If the foreground window is a restricted app (see app_rule_resolver.py),
+    resolve the policy for these detections and act on it -- clearing the
+    clipboard and creating an Incident, same as the AI-platform path, but
+    reported as a generic Incident (not an AiLeakAttempt, since this isn't
+    about an AI platform).
+
+    Being a restricted app is NOT itself a violation (mirrors Microsoft
+    Purview's "Restricted apps": the app runs fine otherwise) -- this only
+    fires because sensitive content is ALSO present, same trigger condition
+    as the AI-platform check right before this is called.
+
+    Returns the resolved action, or None if no restricted app is active.
+    """
+    label = app_rule_resolver.match(_get_foreground_title()) if app_rule_resolver else None
+    if not label:
+        return None
+
+    policy = policy_resolver.resolve(detections) if policy_resolver else {"id": None, "action": "BLOCK", "name": None}
+    action = policy["action"]
+
+    if action == "ALLOW":
+        logger.debug(f"[CLIPBOARD] Sensitive content near restricted app '{label}' but policy allows it")
+        return "ALLOW"
+
+    cleared = False
+    if action in ("BLOCK", "QUARANTINE"):
+        try:
+            pyperclip.copy(_DLP_BLOCK_MSG)
+            cleared = True
+            logger.warning(f"[CLIPBOARD] *** CLIPBOARD CLEARED *** restricted app='{label}'")
+        except Exception as exc:
+            logger.error(f"[CLIPBOARD] Clipboard clear FAILED: {exc}")
+
+    incident = client.create_incident(
+        agent_id=agent_id,
+        policy_id=policy["id"],
+        severity=_risk_to_severity(risk_score),
+        channel="CLIPBOARD",
+        evidence=f"Restricted app active: {label}",
+        risk_score=risk_score,
+    )
+    if incident:
+        logger.success(f"[CLIPBOARD] Incident REPORTED (restricted app)  id={incident.get('id')}  action={action}")
+        if cleared and incident.get("id"):
+            _offer_incident_review_request(client, incident["id"], label)
+    else:
+        logger.error("[CLIPBOARD] Failed to report restricted-app incident")
+
+    return action
 
 
 def _get_clipboard_files() -> tuple[str, ...]:
@@ -84,6 +165,8 @@ def _scan_copied_files(
     agent_id: str,
     state: AgentState,
     blocker: AiBlocker,
+    policy_resolver=None,
+    app_rule_resolver=None,
 ) -> None:
     """Classify each copied file the same way clipboard text is classified,
     and block/report exactly like the text path does."""
@@ -136,31 +219,35 @@ def _scan_copied_files(
             detections=detections,
         )
 
+        # check_and_block() already reported this internally for any outcome
+        # other than None (see its docstring) -- do not report it again here.
         if action_taken is None:
-            state.flag_sensitive_clipboard()
-            logger.warning(
-                "[CLIPBOARD] No AI window active now -- "
-                "flagged for AI monitor (will block within 1 s of opening AI tab)"
+            # KNOWN SCOPE BOUNDARY: if this defers to the delayed path (an
+            # AI window opens later), that path only carries detections/
+            # risk_score/content_sample forward (see AgentState), not this
+            # file's path -- so a QUARANTINE resolved later there won't
+            # reach back to quarantine the original file, only the
+            # immediate-path branch below can. Same clipboard-clear/report
+            # behavior either way; only this extra file-move is affected.
+            restricted_action = _check_restricted_app(
+                client, agent_id, app_rule_resolver, policy_resolver, detections, risk_score,
             )
-            action_taken = "ALERT"  # still worth an audit record below, just not blocked yet
-
-        if action_taken == "ALLOW":
-            continue  # policy says let this through -- no audit record either
-
-        attempt = client.report_ai_leak_attempt(
-            agent_id=agent_id,
-            platform="OTHER_AI",
-            method="CLIPBOARD",
-            content_sample=sample,
-            risk_score=risk_score,
-            blocked=(action_taken in ("BLOCK", "QUARANTINE")),
-        )
-        if attempt:
-            logger.success(
-                f"[CLIPBOARD] File leak attempt recorded: id={attempt.get('id')} | action={action_taken}"
-            )
+            if restricted_action == "QUARANTINE":
+                quarantine_file(path)
+            if restricted_action is None:
+                state.flag_sensitive_clipboard(
+                    detections=detections, risk_score=risk_score, content_sample=sample,
+                )
+                logger.warning(
+                    "[CLIPBOARD] No AI window active now -- "
+                    "flagged for AI monitor (will block within 1 s of opening AI tab)"
+                )
+        elif action_taken == "ALLOW":
+            logger.debug("[CLIPBOARD] Policy allows this copied file -- no block, no report")
         else:
-            logger.error("[CLIPBOARD] Failed to record file leak attempt -- backend may be down")
+            logger.warning(f"[CLIPBOARD] Copied file action={action_taken} applied")
+            if action_taken == "QUARANTINE":
+                quarantine_file(path)
 
 
 def _clipboard_loop(
@@ -169,6 +256,8 @@ def _clipboard_loop(
     state: AgentState,
     stop: threading.Event,
     blocker: AiBlocker,
+    policy_resolver=None,
+    app_rule_resolver=None,
 ) -> None:
     prev        = ""
     prev_files: tuple[str, ...] = ()
@@ -195,7 +284,7 @@ def _clipboard_loop(
                     f"[CLIPBOARD] File(s) copied | count={len(files)} | "
                     f"{[os.path.basename(f) for f in files]}"
                 )
-                _scan_copied_files(files, client, agent_id, state, blocker)
+                _scan_copied_files(files, client, agent_id, state, blocker, policy_resolver, app_rule_resolver)
 
         try:
             current = pyperclip.paste()
@@ -262,41 +351,36 @@ def _clipboard_loop(
 
             if action_taken == "ALLOW":
                 logger.debug("[CLIPBOARD] Policy allows this content -- no block, no report")
+            elif action_taken in ("BLOCK", "QUARANTINE"):
+                # check_and_block() already reported this internally (see its
+                # docstring) -- do not report it again here.
+                logger.warning(
+                    "[CLIPBOARD] Immediate block applied -- "
+                    "AI window was active at copy time"
+                )
+            elif action_taken == "ALERT":
+                # Also already reported internally by check_and_block().
+                logger.warning("[CLIPBOARD] Policy set to ALERT -- reporting without blocking")
             else:
-                if action_taken in ("BLOCK", "QUARANTINE"):
-                    logger.warning(
-                        "[CLIPBOARD] Immediate block applied -- "
-                        "AI window was active at copy time"
+                # No AI window open yet -- check restricted apps before
+                # falling back to the delayed-AI-check flag.
+                restricted_action = _check_restricted_app(
+                    client, agent_id, app_rule_resolver, policy_resolver, detections, risk_score,
+                )
+                if restricted_action is None:
+                    # check_and_block() returned None without reporting
+                    # anything (nothing to report: not confirmed AI-related
+                    # yet). Flag state so the delayed AI monitor loop can
+                    # block AND report if/when an AI window opens within the
+                    # next 30 s; if one never does, this was never actually
+                    # an AI leak attempt, so nothing is recorded.
+                    state.flag_sensitive_clipboard(
+                        detections=detections, risk_score=risk_score, content_sample=_mask(current),
                     )
-                elif action_taken == "ALERT":
-                    logger.warning("[CLIPBOARD] Policy set to ALERT -- reporting without blocking")
-                else:
-                    # No AI window open yet — flag state so the 1 s AI monitor
-                    # loop will block when the user navigates to one.
-                    state.flag_sensitive_clipboard()
                     logger.warning(
                         "[CLIPBOARD] No AI window active now -- "
                         "flagged for AI monitor (will block within 1 s of opening AI tab)"
                     )
-
-                # Always record the clipboard leak attempt for audit trail
-                # (unless the policy said ALLOW, handled above)
-                blocked = action_taken in ("BLOCK", "QUARANTINE")
-                attempt = client.report_ai_leak_attempt(
-                    agent_id=agent_id,
-                    platform="OTHER_AI",
-                    method="CLIPBOARD",
-                    content_sample=_mask(current),
-                    risk_score=risk_score,
-                    blocked=blocked,
-                )
-                if attempt:
-                    logger.success(
-                        f"[CLIPBOARD] Leak attempt recorded: id={attempt.get('id')} | "
-                        f"blocked={blocked}"
-                    )
-                else:
-                    logger.error("[CLIPBOARD] Failed to record attempt -- backend may be down")
 
         stop.wait(_POLL_INTERVAL)
 
@@ -307,10 +391,12 @@ def start_clipboard_watcher(
     state: AgentState,
     stop: threading.Event,
     blocker: AiBlocker,
+    policy_resolver=None,
+    app_rule_resolver=None,
 ) -> threading.Thread:
     t = threading.Thread(
         target=_clipboard_loop,
-        args=(client, agent_id, state, stop, blocker),
+        args=(client, agent_id, state, stop, blocker, policy_resolver, app_rule_resolver),
         daemon=True,
         name="clipboard-watcher",
     )

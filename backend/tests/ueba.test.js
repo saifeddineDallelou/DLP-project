@@ -73,6 +73,125 @@ describe('GET/POST /api/ueba/baseline', () => {
   });
 });
 
+describe('POST /api/ueba/baseline/:userId/recompute', () => {
+  test('requires ADMIN/ANALYST role', async () => {
+    const { user } = await createUser({ role: 'VIEWER' });
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${user.id}/recompute`)
+      .set('Authorization', authHeader(user));
+    expect(res.status).toBe(403);
+  });
+
+  test('404s when the user has no behavior events at all', async () => {
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const { user: target } = await createUser();
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${target.id}/recompute`)
+      .set('Authorization', authHeader(analyst));
+    expect(res.status).toBe(404);
+  });
+
+  test('computes a baseline for an OS username with no matching dashboard User account', async () => {
+    // The live agent reports BehaviorEvent.userId as the Windows username
+    // (e.g. "MMD"), not a dashboard login account -- userId is a free
+    // string, not a foreign key to users, so this must work.
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const agent = await createAgent();
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: 'MMD', eventType: 'FILE_ACCESS', metadata: { count: 5, hour: 10 } },
+    });
+
+    const res = await request(app)
+      .post('/api/ueba/baseline/MMD/recompute')
+      .set('Authorization', authHeader(analyst));
+
+    expect(res.status).toBe(200);
+    expect(res.body.userId).toBe('MMD');
+  });
+
+  test('computes avgDailyFiles and avgUsbFrequency from real event history', async () => {
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const { user: target } = await createUser();
+    const agent = await createAgent();
+
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'FILE_ACCESS', metadata: { count: 20, hour: 10 } },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'AFTER_HOURS_ACCESS', metadata: { count: 10, hour: 22 } },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'USB_INSERT', metadata: {} },
+    });
+
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${target.id}/recompute?days=10`)
+      .set('Authorization', authHeader(analyst));
+
+    expect(res.status).toBe(200);
+    expect(res.body.avgDailyFiles).toBeCloseTo(3.0, 3);   // (20 + 10 files) / 10 days
+    expect(res.body.avgUsbFrequency).toBeCloseTo(0.1, 3); // 1 insert / 10 days
+    expect(res.body.computedFrom.eventCount).toBe(3);
+  });
+
+  test('derives working hours from the 10th/90th percentile of observed activity', async () => {
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const { user: target } = await createUser();
+    const agent = await createAgent();
+
+    for (const hour of [8, 9, 10, 11, 17, 18, 19]) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: target.id, eventType: 'FILE_ACCESS', metadata: { count: 1, hour } },
+      });
+    }
+
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${target.id}/recompute`)
+      .set('Authorization', authHeader(analyst));
+
+    expect(res.status).toBe(200);
+    // 7 samples sorted [8,9,10,11,17,18,19] -- floor(0.1*6)=0 -> 8, floor(0.9*6)=5 -> 18
+    expect(res.body.avgWorkingHourStart).toBe(8);
+    expect(res.body.avgWorkingHourEnd).toBe(18);
+  });
+
+  test('computes avgDailyVolumeMB from FILE_ACCESS sizeMB metadata', async () => {
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const { user: target } = await createUser();
+    const agent = await createAgent();
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'FILE_ACCESS', metadata: { count: 5, sizeMB: 20, hour: 10 } },
+    });
+
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${target.id}/recompute?days=10`)
+      .set('Authorization', authHeader(analyst));
+
+    expect(res.status).toBe(200);
+    expect(res.body.avgDailyVolumeMB).toBeCloseTo(2.0, 3); // 20 MB / 10 days
+  });
+
+  test('includes LARGE_FILE_TRANSFER volume without double-counting FILE_ACCESS', async () => {
+    const { user: analyst } = await createUser({ role: 'ADMIN' });
+    const { user: target } = await createUser();
+    const agent = await createAgent();
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'FILE_ACCESS', metadata: { count: 5, sizeMB: 20, hour: 10 } },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: target.id, eventType: 'LARGE_FILE_TRANSFER', metadata: { filename: 'archive.zip', sizeMB: 150, hour: 14 } },
+    });
+
+    const res = await request(app)
+      .post(`/api/ueba/baseline/${target.id}/recompute?days=10`)
+      .set('Authorization', authHeader(analyst));
+
+    expect(res.status).toBe(200);
+    expect(res.body.avgDailyVolumeMB).toBeCloseTo(17.0, 3); // (20 + 150) MB / 10 days
+    expect(res.body.computedFrom.largeFileTransfers).toBe(1);
+  });
+});
+
 describe('GET/POST /api/ueba/events', () => {
   test('POST validates required fields', async () => {
     const res = await request(app).post('/api/ueba/events').send({});
@@ -143,6 +262,30 @@ describe('GET /api/ueba/risk-score/:userId', () => {
     expect(res.body.baselineExists).toBe(true);
   });
 
+  test('large file transfers contribute to the live risk score', async () => {
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 5,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 0,
+        riskScore: 0.2, lastUpdated: new Date(),
+      },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'LARGE_FILE_TRANSFER', metadata: { sizeMB: 150 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.status).toBe(200);
+    // 0.2 base + 0.15 (1 large file transfer) = 0.35
+    expect(res.body.liveRiskScore).toBeCloseTo(0.35, 3);
+    expect(res.body.last24h.largeFileTransfers).toBe(1);
+  });
+
   test('handles missing baseline gracefully', async () => {
     const { user } = await createUser();
     const res = await request(app)
@@ -152,5 +295,26 @@ describe('GET /api/ueba/risk-score/:userId', () => {
     expect(res.status).toBe(200);
     expect(res.body.baselineExists).toBe(false);
     expect(res.body.liveRiskScore).toBe(0);
+    expect(res.body.baseline).toBeNull();
+  });
+
+  test('includes the computed baseline stats (avgDailyFiles, working hours, USB) in the response', async () => {
+    const { user } = await createUser();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId: user.id, avgDailyFiles: 3.33, avgDailyVolumeMB: 0,
+        avgWorkingHourStart: 8, avgWorkingHourEnd: 19, avgUsbFrequency: 0.1,
+        riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.status).toBe(200);
+    expect(res.body.baseline).toMatchObject({
+      avgDailyFiles: 3.33, avgDailyVolumeMB: 0, avgWorkingHourStart: 8, avgWorkingHourEnd: 19, avgUsbFrequency: 0.1,
+    });
   });
 });

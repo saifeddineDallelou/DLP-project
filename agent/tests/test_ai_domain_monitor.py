@@ -1,10 +1,11 @@
+import threading
 import time
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 import ai_domain_monitor as aidm
-from ai_domain_monitor import AiBlocker, _detect_platform_in_text, _is_browser_window
+from ai_domain_monitor import AiBlocker, _detect_platform_in_text, _is_browser_window, _ai_monitor_loop
 
 
 class TestDetectPlatformInText:
@@ -50,6 +51,7 @@ class TestAiBlocker:
         _, kwargs = client.report_ai_leak_attempt.call_args
         assert kwargs["platform"] == "ANTHROPIC_CLAUDE"
         assert kwargs["blocked"] is True
+        assert kwargs["policy_id"] is None  # no resolver -> no policy to link
 
     def test_allow_action_does_not_clear_clipboard_or_report(self):
         resolver = MagicMock()
@@ -76,6 +78,7 @@ class TestAiBlocker:
         client.report_ai_leak_attempt.assert_called_once()
         _, kwargs = client.report_ai_leak_attempt.call_args
         assert kwargs["blocked"] is False
+        assert kwargs["policy_id"] == "p1"
 
     def test_quarantine_action_behaves_like_block(self):
         resolver = MagicMock()
@@ -89,6 +92,7 @@ class TestAiBlocker:
         mock_copy.assert_called_once()
         _, kwargs = client.report_ai_leak_attempt.call_args
         assert kwargs["blocked"] is True
+        assert kwargs["policy_id"] == "p1"
 
     def test_passes_detections_to_policy_resolver(self):
         resolver = MagicMock()
@@ -129,6 +133,25 @@ class TestAiBlocker:
 
         assert client.report_ai_leak_attempt.call_count == 2
 
+    def test_clip_clear_cooldown_is_independent_per_platform(self):
+        # A block on one platform must NOT suppress a block on a DIFFERENT
+        # platform detected moments later -- e.g. paste into Grok, then
+        # Gemini 3s later, are two separate leak attempts and each must be
+        # independently blocked, not silently let through because a
+        # different platform's clear timer is still cooling down.
+        blocker, client = self._make_blocker()
+        with patch("ai_domain_monitor.pyperclip.copy") as mock_copy:
+            with patch.object(blocker, "_detect_platform", return_value=("GROK", "x")):
+                result1 = blocker.check_and_block(t_detect=time.monotonic())
+            with patch.object(blocker, "_detect_platform", return_value=("GOOGLE_GEMINI", "y")):
+                result2 = blocker.check_and_block(t_detect=time.monotonic())
+
+        assert result1 == "BLOCK"
+        assert result2 == "BLOCK"
+        assert mock_copy.call_count == 2
+        _, kwargs = client.report_ai_leak_attempt.call_args
+        assert kwargs["blocked"] is True
+
     def test_clipboard_clear_failure_does_not_prevent_reporting(self):
         blocker, client = self._make_blocker()
         with patch.object(blocker, "_detect_platform", return_value=("GROK", "x")):
@@ -137,6 +160,136 @@ class TestAiBlocker:
 
         assert result == "BLOCK"
         client.report_ai_leak_attempt.assert_called_once()
+
+
+class TestBlockWithReviewRequest:
+    def _make_blocker(self):
+        client = MagicMock()
+        client.report_ai_leak_attempt.return_value = {"id": "attempt-1"}
+        return AiBlocker(client, "agent-1"), client
+
+    def _capture_thread_target(self):
+        captured = {}
+        def fake_thread(target, **kwargs):
+            captured["fn"] = target
+            return MagicMock()
+        return captured, fake_thread
+
+    def test_requests_review_with_note_but_never_touches_clipboard(self):
+        blocker, client = self._make_blocker()
+        client.request_review_ai_leak_attempt.return_value = {"id": "attempt-1", "reviewRequested": True}
+        captured, fake_thread = self._capture_thread_target()
+
+        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "window='Claude'")), \
+             patch("ai_domain_monitor.pyperclip.copy") as mock_copy, \
+             patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread), \
+             patch("ai_domain_monitor.prompt_review_request", return_value="Looked legitimate to me"):
+            result = blocker.check_and_block(t_detect=time.monotonic(), risk_score=0.9)
+            assert result == "BLOCK"
+            captured["fn"]()  # run the "background thread" synchronously, patches still active
+
+        # The clipboard clear (block message) is the only copy() call --
+        # nothing ever restores the original content.
+        mock_copy.assert_called_once_with("[BLOCKED BY DLP - Sensitive content detected]")
+        client.request_review_ai_leak_attempt.assert_called_once_with("attempt-1", "Looked legitimate to me")
+
+    def test_review_request_with_no_note_still_flags_it(self):
+        blocker, client = self._make_blocker()
+        client.request_review_ai_leak_attempt.return_value = {"id": "attempt-1", "reviewRequested": True}
+        captured, fake_thread = self._capture_thread_target()
+
+        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "x")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread), \
+             patch("ai_domain_monitor.prompt_review_request", return_value=""):
+            blocker.check_and_block(t_detect=time.monotonic())
+            captured["fn"]()
+
+        client.request_review_ai_leak_attempt.assert_called_once_with("attempt-1", None)
+
+    def test_dismissed_prompt_does_not_request_review(self):
+        blocker, client = self._make_blocker()
+        captured, fake_thread = self._capture_thread_target()
+
+        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "x")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread), \
+             patch("ai_domain_monitor.prompt_review_request", return_value=None):
+            blocker.check_and_block(t_detect=time.monotonic())
+            captured["fn"]()
+
+        client.request_review_ai_leak_attempt.assert_not_called()
+
+    def test_no_review_prompt_offered_for_alert_action(self):
+        # ALERT never clears the clipboard, so there's nothing worth
+        # prompting about -- do_clear is False, no thread must spawn.
+        blocker, client = self._make_blocker()
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "ALERT", "name": "Alert Policy"}
+        blocker = AiBlocker(client, "agent-1", policy_resolver=resolver)
+
+        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "x")), \
+             patch("ai_domain_monitor.threading.Thread") as mock_thread:
+            blocker.check_and_block(t_detect=time.monotonic())
+
+        mock_thread.assert_not_called()
+
+
+class TestAiMonitorLoop:
+    """_ai_monitor_loop is the DELAYED path: it fires when a sensitive
+    clipboard copy happened while no AI window was open yet, then an AI tab
+    gets opened within the flag window. It must resolve the SAME policy the
+    immediate check would have -- i.e. carry the original classify()
+    detections through via AgentState.sensitive_clip_context(), not resolve
+    against an empty list (which always falls back to the default policy)."""
+
+    def _run_one_iteration(self, state, blocker):
+        stop = threading.Event()
+        blocker.check_and_block.side_effect = lambda **kwargs: (stop.set(), "BLOCK")[1]
+        _ai_monitor_loop("agent-1", state, stop, blocker)
+
+    def test_passes_carried_detections_to_check_and_block(self):
+        state = MagicMock()
+        state.clipboard_flagged_recently.return_value = True
+        state.sensitive_clip_monotonic.return_value = time.monotonic()
+        detections = [{"rule": "PCI-DSS", "type": "credit_card"}]
+        state.sensitive_clip_context.return_value = {
+            "detections": detections, "risk_score": 0.9, "content_sample": "card ****1111",
+        }
+        blocker = MagicMock()
+
+        self._run_one_iteration(state, blocker)
+
+        _, kwargs = blocker.check_and_block.call_args
+        assert kwargs["detections"] == detections
+        assert kwargs["risk_score"] == 0.9
+        assert kwargs["content_sample"] == "card ****1111"
+        assert kwargs["source_tag"] == "CLIPBOARD_DELAYED"
+
+    def test_falls_back_to_sensible_defaults_when_context_is_empty(self):
+        state = MagicMock()
+        state.clipboard_flagged_recently.return_value = True
+        state.sensitive_clip_monotonic.return_value = time.monotonic()
+        state.sensitive_clip_context.return_value = {}
+        blocker = MagicMock()
+
+        self._run_one_iteration(state, blocker)
+
+        _, kwargs = blocker.check_and_block.call_args
+        assert kwargs["detections"] is None
+        assert kwargs["risk_score"] == 0.95
+        assert kwargs["content_sample"] == ""
+
+    def test_skips_check_when_nothing_recently_flagged(self):
+        state = MagicMock()
+        state.clipboard_flagged_recently.return_value = False
+        blocker = MagicMock()
+        stop = MagicMock()
+        stop.is_set.side_effect = [False, True]  # run exactly one iteration
+
+        _ai_monitor_loop("agent-1", state, stop, blocker)
+
+        blocker.check_and_block.assert_not_called()
 
 
 class TestIsBrowserWindow:
@@ -241,10 +394,23 @@ class TestAiBlockerDetectPlatformTiers:
     def test_tier3_process_fallback_when_no_title_or_url_match(self):
         blocker = self._make_blocker()
         with patch("ai_domain_monitor._enum_all_windows", return_value=[(1, "Untitled - Notepad")]), \
-             patch("ai_domain_monitor._scan_processes_raw", return_value=("ANTHROPIC_CLAUDE", "claude")):
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[(999, "claude", "ANTHROPIC_CLAUDE")]), \
+             patch("ai_domain_monitor._window_owner_pids", return_value={999}):
             plat, detail = blocker._detect_platform()
         assert plat == "ANTHROPIC_CLAUDE"
         assert "process=" in detail
+
+    def test_tier3_ignores_process_match_without_a_visible_window(self):
+        # A name match on a headless background/helper process (e.g. this
+        # dev machine's own Claude Code subprocesses, all named "claude")
+        # must NOT be mistaken for the AI platform actually in use -- see
+        # _window_owner_pids.
+        blocker = self._make_blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(1, "Untitled - Notepad")]), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[(999, "claude", "ANTHROPIC_CLAUDE")]), \
+             patch("ai_domain_monitor._window_owner_pids", return_value=set()):  # pid 999 owns no window
+            plat, detail = blocker._detect_platform()
+        assert plat is None
 
     def test_address_bar_only_checked_for_browser_windows(self):
         blocker = self._make_blocker()
@@ -254,7 +420,7 @@ class TestAiBlockerDetectPlatformTiers:
         ), patch(
             "ai_domain_monitor._detect_platform_via_address_bar",
         ) as mock_url, patch(
-            "ai_domain_monitor._scan_processes_raw", return_value=(None, ""),
+            "ai_domain_monitor._scan_processes_raw", return_value=[],
         ):
             blocker._detect_platform()
         mock_url.assert_not_called()
@@ -263,16 +429,33 @@ class TestAiBlockerDetectPlatformTiers:
 class TestScanProcessesRaw:
     def test_matches_known_process_keyword(self):
         fake_proc = MagicMock()
-        fake_proc.info = {"name": "Claude.exe"}
+        fake_proc.info = {"pid": 1234, "name": "Claude.exe"}
         with patch("ai_domain_monitor.psutil.process_iter", return_value=[fake_proc]):
-            plat, name = aidm._scan_processes_raw()
-        assert plat == "ANTHROPIC_CLAUDE"
-        assert name == "claude"
+            matches = aidm._scan_processes_raw()
+        assert matches == [(1234, "claude", "ANTHROPIC_CLAUDE")]
 
-    def test_no_match_returns_none(self):
+    def test_no_match_returns_empty_list(self):
         fake_proc = MagicMock()
-        fake_proc.info = {"name": "notepad.exe"}
+        fake_proc.info = {"pid": 1234, "name": "notepad.exe"}
         with patch("ai_domain_monitor.psutil.process_iter", return_value=[fake_proc]):
-            plat, name = aidm._scan_processes_raw()
-        assert plat is None
-        assert name == ""
+            matches = aidm._scan_processes_raw()
+        assert matches == []
+
+    def test_returns_every_matching_process_not_just_the_first(self):
+        procs = [MagicMock(info={"pid": 1, "name": "claude.exe"}), MagicMock(info={"pid": 2, "name": "chatgpt.exe"})]
+        with patch("ai_domain_monitor.psutil.process_iter", return_value=procs):
+            matches = aidm._scan_processes_raw()
+        assert matches == [(1, "claude", "ANTHROPIC_CLAUDE"), (2, "chatgpt", "OPENAI_CHATGPT")]
+
+
+class TestWindowOwnerPids:
+    def test_collects_pid_for_each_window_via_win32_api(self):
+        def fake_get_pid(hwnd, pid_ref):
+            pid_ref._obj.value = 4242 if hwnd == 111 else 5555
+
+        with patch("ai_domain_monitor.ctypes.windll.user32.GetWindowThreadProcessId", side_effect=fake_get_pid):
+            pids = aidm._window_owner_pids([(111, "Notepad"), (222, "Chrome")])
+        assert pids == {4242, 5555}
+
+    def test_empty_window_list_returns_empty_set(self):
+        assert aidm._window_owner_pids([]) == set()

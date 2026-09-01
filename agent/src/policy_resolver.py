@@ -52,12 +52,21 @@ class PolicyResolver:
         for policy in policies:
             if not policy.get("enabled", True):
                 continue
+            conditions = policy.get("conditions") or {}
             entry = {
                 "id": policy["id"],
                 "action": policy.get("action") or DEFAULT_ACTION,
                 "name": policy.get("name"),
+                # Patterns are stored upper-cased with spaces normalized to
+                # underscores (e.g. "CREDIT CARD" -> "CREDIT_CARD") to match
+                # the classifier's detection `type`/keyword-`value` field --
+                # a human typing a pattern into the dashboard naturally uses
+                # spaces, but engine.py's types are underscore-separated. See
+                # _matches_gate() / _detection_matches_patterns().
+                "patterns": [str(p).upper().replace(" ", "_") for p in (conditions.get("patterns") or [])],
+                "threshold": conditions.get("threshold") or 1,
             }
-            rule = (policy.get("conditions") or {}).get("complianceRule")
+            rule = conditions.get("complianceRule")
             if rule:
                 mapping[rule] = entry
             if policy.get("name") == "PII Detection":
@@ -77,7 +86,8 @@ class PolicyResolver:
         """
         Return {"id", "action", "name"} for the policy matching the first
         (highest-priority) detection whose compliance rule has a configured
-        policy, else the default policy.
+        policy AND whose patterns/threshold gate (see _matches_gate) is
+        satisfied by the full detection set, else the default policy.
 
         A rule like "GDPR/loi-09-08" matches a policy tagged just "GDPR" --
         only the part before the slash is the compliance-framework name, the
@@ -90,7 +100,52 @@ class PolicyResolver:
         for detection in detections:
             rule = detection.get("rule", "")
             base_rule = rule.split("/")[0]
-            if base_rule in mapping:
-                return mapping[base_rule]
+            candidate = mapping.get(base_rule)
+            if candidate and self._matches_gate(candidate, base_rule, detections):
+                return candidate
 
         return default
+
+    @staticmethod
+    def _matches_gate(candidate: dict, base_rule: str, detections: list[dict]) -> bool:
+        """
+        A policy's `patterns`/`threshold` conditions (edited in the dashboard's
+        ConditionsEditor) restrict when it actually applies, on top of the
+        compliance-rule match:
+
+        - `patterns` (e.g. ["CREDIT_CARD", "SSN"]): if set, only detections
+          matching one of these count -- see _detection_matches_patterns for
+          what "matching" means. If unset/empty, any detection sharing this
+          policy's compliance rule counts (unrestricted, same behavior as
+          before patterns existed).
+        - `threshold`: minimum number of matching detections required
+          (default 1).
+        """
+        patterns = candidate.get("patterns") or []
+        threshold = candidate.get("threshold") or 1
+        if patterns:
+            matching = sum(1 for d in detections if PolicyResolver._detection_matches_patterns(d, patterns))
+        else:
+            matching = sum(1 for d in detections if d.get("rule", "").split("/")[0] == base_rule)
+        return matching >= threshold
+
+    @staticmethod
+    def _detection_matches_patterns(detection: dict, patterns: list[str]) -> bool:
+        """
+        A structured-pattern detection (credit_card, ssn, iban, ...) is
+        identified by its `type`, so "CREDIT_CARD" in a policy's patterns
+        matches a detection with type "credit_card" directly.
+
+        A keyword-hit detection is different: the classifier always tags
+        those with type "keyword" (see classifier/src/engine.py
+        _run_keywords) -- the actual keyword is in `value` instead (e.g.
+        type="keyword", value="password"). So "PASSWORD" in a policy's
+        patterns has to match against `value`, not the always-"keyword" type.
+        """
+        dtype = (detection.get("type") or "").upper()
+        if dtype in patterns:
+            return True
+        if dtype == "KEYWORD":
+            value = (detection.get("value") or "").upper().replace(" ", "_")
+            return value in patterns
+        return False

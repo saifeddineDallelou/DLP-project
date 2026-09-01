@@ -111,11 +111,12 @@ router.get('/:id', authenticate, async (req, res, next) => {
 // PATCH /api/incidents/:id
 router.patch('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
   try {
-    const { status, assignedToId, riskScore } = req.body;
+    const { status, assignedToId, riskScore, adminNote } = req.body;
     const data = {};
     if (status) data.status = status;
     if (assignedToId !== undefined) data.assignedToId = assignedToId;
     if (riskScore !== undefined) data.riskScore = riskScore;
+    if (adminNote !== undefined) data.adminNote = adminNote;
     if (status === 'RESOLVED') data.resolvedAt = new Date();
 
     const incident = await prisma.incident.update({ where: { id: req.params.id }, data });
@@ -134,6 +135,36 @@ router.patch('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, 
     res.json(incident);
   } catch (err) {
     if (err.code === 'P2025') return res.status(404).json({ error: 'Incident not found' });
+    next(err);
+  }
+});
+
+// PATCH /api/incidents/:id/request-review  (agent-token only -- the block is
+// silent for the end user; this just flags it with an optional note asking
+// an admin to take a look. It never unblocks/restores anything by itself --
+// that's a deliberate difference from the earlier "override" behavior.)
+router.patch('/:id/request-review', async (req, res, next) => {
+  try {
+    const agentToken = req.headers['x-agent-token'];
+    if (!agentToken) return res.status(401).json({ error: 'x-agent-token required' });
+
+    const { note } = req.body;
+
+    const incident = await prisma.incident.findUnique({ where: { id: req.params.id } });
+    if (!incident) return res.status(404).json({ error: 'Incident not found' });
+
+    const agent = await prisma.agent.findUnique({ where: { id: incident.agentId } });
+    if (!agent || agent.token !== agentToken) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const updated = await prisma.incident.update({
+      where: { id: req.params.id },
+      data: { reviewRequested: true, justification: note && note.trim() ? note.trim() : null },
+    });
+
+    res.json(updated);
+  } catch (err) {
     next(err);
   }
 });
