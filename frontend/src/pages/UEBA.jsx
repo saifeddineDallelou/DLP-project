@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Activity, RefreshCw, TrendingUp, User, ShieldAlert } from 'lucide-react';
+import { Activity, RefreshCw, TrendingUp, User, ShieldAlert, AlertTriangle } from 'lucide-react';
 import api from '../services/api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -70,8 +70,12 @@ function ComponentRow({ metricKey, c }) {
 
 function RiskProfileCard({ profile }) {
   const tone = RISK_LEVEL_TONES[profile.riskLevel] ?? RISK_LEVEL_TONES.LOW;
-  // Present only while the baseline is too thin to score deviations from.
+  // Present whenever the baseline is too thin to score DEVIATIONS from --
+  // which is independent of whether today looks alarming. A user two days in
+  // who trips real policy violations gets a real band AND this caveat.
   const learning = profile.learning ?? null;
+  // Quiet and unbaselined: nothing to show a band for yet.
+  const stillLearning = profile.riskLevel === 'LEARNING';
   const hasBreakdown = profile.components && Object.keys(profile.components).length > 0;
   return (
     <div className="card">
@@ -91,7 +95,7 @@ function RiskProfileCard({ profile }) {
         <span className={`badge text-[10px] ${tone.text} bg-white/5`}>{profile.riskLevel}</span>
       </div>
 
-      {learning ? (
+      {stillLearning ? (
         // A progress bar toward being scorable, not a risk bar. Showing a
         // percentage here would read as "12% risky" when it means "12% of the
         // way to knowing anything about this person".
@@ -122,6 +126,19 @@ function RiskProfileCard({ profile }) {
                  style={{ width: `${Math.round(profile.liveRiskScore * 100)}%` }} />
           </div>
         </>
+      )}
+
+      {learning && !stillLearning && (
+        // The alarm is real and rests on policy violations, which need no
+        // history. What is missing is the behavioural half -- say so rather
+        // than letting the band imply a completeness it does not have.
+        <div className="flex items-start gap-1.5 mb-3 px-2 py-1.5 rounded-lg bg-white/5 border border-border">
+          <AlertTriangle size={11} className="text-severity-medium-text shrink-0 mt-0.5" />
+          <p className="text-[10px] text-ink-faint leading-snug">
+            Scored on policy violations only — baseline {learning.activeDaysObserved}/
+            {learning.activeDaysRequired} days, so deviation scoring is not active yet.
+          </p>
+        </div>
       )}
 
       {hasBreakdown ? (

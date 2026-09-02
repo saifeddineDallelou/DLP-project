@@ -11,6 +11,8 @@ const {
   baselineIsMature,
   MIN_ACTIVE_DAYS,
   LEARNING_LEVEL,
+  EVENT_BONUS_CAP,
+  POLICY_SCORE_MAX,
   ZERO_BASELINE_FLOORS,
 } = require('../lib/ueba-scoring');
 const { recomputeBaseline } = require('../lib/baseline');
@@ -362,7 +364,7 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
     // even at volumes within this user's normal range. They are no longer the
     // whole score, which is what they were before.
     const eventBonus = Math.min(
-      0.3,
+      EVENT_BONUS_CAP,
       afterHours * 0.05 + usbInserts * 0.02 + largeFileTransfers * 0.08,
     );
 
@@ -423,9 +425,41 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       department: baseline?.department ?? null,
       baselineRiskScore: baseline?.riskScore ?? 0,
       liveRiskScore: parseFloat(liveScore.toFixed(3)),
-      riskLevel: (baseline && mature) ? riskLevel(liveScore) : LEARNING_LEVEL,
-      // Everything the dashboard needs to say "learning, 4 of 7 days" rather
-      // than showing a band it has not earned.
+      // "How much of a baseline do we have" and "how alarming is today" are
+      // INDEPENDENT facts, and an earlier version of this collapsed them:
+      // LEARNING replaced the band outright, so a 4 GB dump at 3am on a
+      // user's second day displayed as a calm grey "building baseline" card
+      // while eventBonus and priorityBoost sat pegged at their caps.
+      //
+      // Two kinds of detection, and only one of them needs a baseline:
+      //   * anomaly    -- "is this unusual FOR YOU": needs one, so it is
+      //                   withheld during learning (deviationScore is 0)
+      //   * policy     -- "is this bad regardless of who you are": a 2.4 GB
+      //                   transfer, a PCI-DSS block, a USB insert at 3am.
+      //                   Needs no history and must still fire.
+      //
+      // So MEDIUM and above stand as they are during learning: they rest on
+      // policy violations alone. Only LOW is withheld, because "no policy
+      // violations today" is not evidence of normal BEHAVIOUR when no
+      // behaviour has been learned -- and reporting LOW there is the exact
+      // false reassurance this whole change exists to remove.
+      riskLevel: (() => {
+        if (baseline && mature) return riskLevel(liveScore);
+        // During learning the score is policy violations and nothing else, so
+        // it can only reach POLICY_SCORE_MAX. Banding it against a 0..1 scale
+        // buries it: event bonuses at their CAP score 0.3, which reads LOW.
+        // Normalise to what this score can actually attain, then band.
+        const band = riskLevel(liveScore / POLICY_SCORE_MAX);
+        // LOW is still withheld -- "no policy violations today" says nothing
+        // about behaviour nobody has observed yet.
+        return band === 'LOW' ? LEARNING_LEVEL : band;
+      })(),
+      // Which halves of the score are actually in play, so the dashboard can
+      // say what a number rests on rather than implying it rests on both.
+      scoredOn: (baseline && mature) ? 'behaviour+policy' : 'policy',
+      // Present whenever the baseline is too thin to score deviations from --
+      // including when the band above is HIGH. The alarm and the caveat are
+      // both true at once.
       learning: (baseline && mature) ? null : {
         activeDaysObserved: baseline?.activeDaysObserved ?? 0,
         activeDaysRequired: MIN_ACTIVE_DAYS,

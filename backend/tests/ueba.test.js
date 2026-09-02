@@ -549,3 +549,95 @@ describe('working-hours baseline sources', () => {
     expect(baseline.avgWorkingHourStart).toBe(10);
   });
 });
+
+describe('policy violations during the learning period', () => {
+  // The hole the first version of the learning gate opened: LEARNING replaced
+  // the risk band outright, so a 4 GB dump at 3am on a user's SECOND day
+  // rendered as a calm grey "building baseline" card -- while eventBonus and
+  // priorityBoost sat pegged at their caps and the score read 0.6.
+  //
+  // Two kinds of detection, only one of which needs a baseline:
+  //   anomaly -- "is this unusual FOR YOU"      -> withheld during learning
+  //   policy  -- "is this bad regardless"        -> must still fire
+  async function thinUser(userId) {
+    const agent = await createAgent();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId, avgDailyFiles: 5, avgDailyVolumeMB: 10,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 0,
+        activeDaysObserved: 2, riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+    return agent;
+  }
+
+  test('a thin baseline with real policy violations reports a real band', async () => {
+    const { user } = await createUser();
+    const agent = await thinUser(user.id);
+    for (let i = 0; i < 4; i++) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'AFTER_HOURS_ACCESS',
+                metadata: { count: 50, sizeMB: 200, hour: 3 } },
+      });
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'LARGE_FILE_TRANSFER',
+                metadata: { sizeMB: 1200, hour: 3 } },
+      });
+    }
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).not.toBe('LEARNING');
+    expect(['MEDIUM', 'HIGH']).toContain(res.body.riskLevel);
+    // The caveat is still true and still reported alongside the alarm.
+    expect(res.body.learning.activeDaysObserved).toBe(2);
+    expect(res.body.scoredOn).toBe('policy');
+    // The behavioural half really is withheld -- this is not a band derived
+    // from a baseline nobody should trust.
+    expect(res.body.deviationScore).toBe(0);
+    expect(res.body.components).toEqual({});
+  });
+
+  test('a quiet user on a thin baseline still reports LEARNING, not LOW', async () => {
+    // LOW would be a claim about behaviour, and no behaviour has been learned.
+    const { user } = await createUser();
+    const agent = await thinUser(user.id);
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+              metadata: { count: 3, sizeMB: 1, hour: 10 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.scoredOn).toBe('policy');
+  });
+
+  test('an established user reports that both halves are in play', async () => {
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 100,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 1,
+        activeDaysObserved: 30, riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+              metadata: { count: 9, sizeMB: 90, hour: 11 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.scoredOn).toBe('behaviour+policy');
+    expect(res.body.learning).toBeNull();
+    expect(res.body.riskLevel).toBe('LOW');
+  });
+});

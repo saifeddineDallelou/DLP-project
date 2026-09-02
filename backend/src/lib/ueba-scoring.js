@@ -211,6 +211,24 @@ const PRIORITY_SEVERITY_WEIGHTS = {
 // Sensitivity is meant to sharpen a deviation score, not replace it.
 const PRIORITY_BOOST_CAP = 0.30;
 
+// The same reasoning for event-type bonuses: they carry information deviation
+// does not, but they are not the whole picture and must not behave as if they
+// were. (Was an inline 0.3 in routes/ueba.js.)
+const EVENT_BONUS_CAP = 0.30;
+
+// What the score can reach when NO deviation component is in play -- i.e. for
+// a user still inside the learning period, whose score is policy violations
+// and nothing else.
+//
+// This matters for banding. riskLevel()'s thresholds (0.4 / 0.7) are
+// calibrated for a full 0..1 score that includes deviation. Applied to a
+// quantity that can only ever reach 0.6, they under-report systematically:
+// event bonuses PEGGED AT THEIR CAP score 0.3, which reads LOW -- so a 4 GB
+// dump at 3am on a user's second day would land in the quietest band there
+// is. Normalising to the attainable range is the standard correction, and it
+// is why a learning user's band is computed against this rather than 1.
+const POLICY_SCORE_MAX = EVENT_BONUS_CAP + PRIORITY_BOOST_CAP;
+
 /**
  * Additional risk from WHAT the user touched, not just how much.
  *
@@ -259,6 +277,8 @@ module.exports = {
   ZERO_BASELINE_MAX_SIGNAL,
   PRIORITY_SEVERITY_WEIGHTS,
   PRIORITY_BOOST_CAP,
+  EVENT_BONUS_CAP,
+  POLICY_SCORE_MAX,
   WEIGHTS,
   deviationSignal,
   hoursSignal,
