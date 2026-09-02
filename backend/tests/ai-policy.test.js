@@ -251,3 +251,82 @@ describe('PATCH /api/ai-policy/attempt/:id (adminNote)', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('PATCH /api/ai-policy/attempt/:id/repeat', () => {
+  test('requires x-agent-token', async () => {
+    const agent = await createAgent();
+    const attempt = await prisma.aiLeakAttempt.create({
+      data: { agentId: agent.id, platform: 'GROK', method: 'BROWSER', riskScore: 0.6 },
+    });
+    const res = await request(app).patch(`/api/ai-policy/attempt/${attempt.id}/repeat`);
+    expect(res.status).toBe(401);
+  });
+
+  test('rejects a token belonging to a different agent', async () => {
+    const owner = await createAgent();
+    const other = await createAgent();
+    const attempt = await prisma.aiLeakAttempt.create({
+      data: { agentId: owner.id, platform: 'GROK', method: 'BROWSER', riskScore: 0.6 },
+    });
+    const res = await request(app)
+      .patch(`/api/ai-policy/attempt/${attempt.id}/repeat`)
+      .set('x-agent-token', other.token);
+    expect(res.status).toBe(401);
+  });
+
+  test('404s for an attempt that does not exist', async () => {
+    const agent = await createAgent();
+    const res = await request(app)
+      .patch('/api/ai-policy/attempt/00000000-0000-0000-0000-000000000000/repeat')
+      .set('x-agent-token', agent.token);
+    expect(res.status).toBe(404);
+  });
+
+  test('a new attempt starts at 1', async () => {
+    const agent = await createAgent();
+    const attempt = await prisma.aiLeakAttempt.create({
+      data: { agentId: agent.id, platform: 'GROK', method: 'BROWSER', riskScore: 0.6 },
+    });
+    expect(attempt.attempts).toBe(1);
+    expect(attempt.lastAttemptAt).toBeNull();
+  });
+
+  test('each repeat increments the count and stamps the time', async () => {
+    const agent = await createAgent();
+    const attempt = await prisma.aiLeakAttempt.create({
+      data: { agentId: agent.id, platform: 'GROK', method: 'BROWSER', riskScore: 0.6 },
+    });
+
+    const first = await request(app)
+      .patch(`/api/ai-policy/attempt/${attempt.id}/repeat`)
+      .set('x-agent-token', agent.token);
+    expect(first.status).toBe(200);
+    expect(first.body.attempts).toBe(2);
+    expect(first.body.lastAttemptAt).not.toBeNull();
+
+    const second = await request(app)
+      .patch(`/api/ai-policy/attempt/${attempt.id}/repeat`)
+      .set('x-agent-token', agent.token);
+    expect(second.body.attempts).toBe(3);
+  });
+
+  test('concurrent repeats do not lose an increment', async () => {
+    // The agent reports from several monitor threads, and a burst is exactly
+    // what this field measures -- a read-modify-write in the route would
+    // undercount precisely when the number matters most.
+    const agent = await createAgent();
+    const attempt = await prisma.aiLeakAttempt.create({
+      data: { agentId: agent.id, platform: 'GROK', method: 'BROWSER', riskScore: 0.6 },
+    });
+
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        request(app)
+          .patch(`/api/ai-policy/attempt/${attempt.id}/repeat`)
+          .set('x-agent-token', agent.token)),
+    );
+
+    const row = await prisma.aiLeakAttempt.findUnique({ where: { id: attempt.id } });
+    expect(row.attempts).toBe(11);
+  });
+});

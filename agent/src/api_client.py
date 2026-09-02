@@ -96,6 +96,15 @@ class DLPApiClient:
             headers=self._agent_headers,
         )
 
+    def repeat_ai_leak_attempt(self, attempt_id: str) -> dict | None:
+        """The same attempt was made again inside the reporting window --
+        increment its counter rather than filing a near-identical row."""
+        return _request(
+            "PATCH",
+            f"{self.backend_url}/api/ai-policy/attempt/{attempt_id}/repeat",
+            headers=self._agent_headers,
+        )
+
     def request_review_ai_leak_attempt(self, attempt_id: str, note: str | None) -> dict | None:
         return _request(
             "PATCH",

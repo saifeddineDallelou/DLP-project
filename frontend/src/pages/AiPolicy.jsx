@@ -102,6 +102,14 @@ export default function AiPolicy() {
                 <td className="td">
                   <div className="flex items-center gap-1.5">
                     <Badge tone="blocked" value={att.blocked} label={att.blocked ? 'Blocked' : 'Allowed'} size="sm" />
+                    {att.attempts > 1 && (
+                      <span
+                        title={`Blocked ${att.attempts} times in this window — a repeated attempt, not a one-off`}
+                        className="chip !text-[10px] !px-1.5 !py-0 text-severity-critical-text"
+                      >
+                        ×{att.attempts}
+                      </span>
+                    )}
                     {att.reviewRequested && (
                       <span title="Worker flagged this for review" className="text-severity-medium-text">
                         <Flag size={12} />
@@ -138,6 +146,9 @@ export default function AiPolicy() {
                 ['Agent',       selected.agent?.hostname ?? '—'],
                 ['Policy',      selected.policy?.name ?? '—'],
                 ['Content Sample', selected.contentSample ?? '—'],
+                ['Attempts',    selected.attempts > 1
+                                  ? `${selected.attempts} (last ${formatDate(selected.lastAttemptAt)})`
+                                  : '1'],
                 ['Time',        formatDate(selected.timestamp)],
               ].map(([k, v]) => (
                 <div key={k} className="bg-surface-elevated border border-border rounded-lg p-3">
