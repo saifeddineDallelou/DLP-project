@@ -303,6 +303,9 @@ class AiBlocker:
         # platform's still-cooling-down clear timer).
         self._last_clip_clear: dict[str, float] = {}
         self._last_alerted: dict[str, float]    = {}
+        # Separate from _last_alerted: incidents are no longer throttled, but
+        # the review prompt still is -- one interruption per minute.
+        self._last_prompted: dict[str, float]   = {}
 
         # Process scan cache shared between the two threads
         self._proc_cache: tuple[str | None, str] = (None, "")
@@ -483,6 +486,11 @@ class AiBlocker:
         # clipboard is only written when it does NOT already hold the block
         # message.
         do_clear = False
+        # True when sensitive content was actually ON the clipboard for this
+        # call -- i.e. a genuinely new attempt, as opposed to the delayed
+        # loop looking at an already-clear clipboard again. Independent of
+        # whether the clear then succeeded.
+        fresh_attempt = False
         if action != "ALERT":
             with self._lock:
                 since_clear = now - self._last_clip_clear.get(detected_plat, 0.0)
@@ -505,13 +513,20 @@ class AiBlocker:
 
             if on_clipboard.startswith(_DLP_BLOCK_MSG[:20]):
                 # The sensitive content is already gone. Still blocked --
-                # there is simply nothing left to overwrite.
+                # there is simply nothing left to overwrite, and nothing new
+                # has happened, so this is not a fresh attempt.
                 do_clear = True
                 logger.debug(
                     f"[AI-MONITOR] Clipboard already cleared, nothing to "
                     f"overwrite | platform={detected_plat}"
                 )
             else:
+                # Sensitive content really is sitting on the clipboard right
+                # now, so this is a genuine attempt whatever happens next --
+                # set before the write, because a clear that FAILS is the most
+                # important thing in this file to report: the data is going
+                # through and nobody is stopping it.
+                fresh_attempt = True
                 do_clear = True
                 try:
                     pyperclip.copy(_DLP_BLOCK_MSG)
@@ -533,15 +548,47 @@ class AiBlocker:
                             f"| platform={detected_plat}"
                         )
                 except Exception as exc:
+                    # Not blocked -- but still reported, and reported as NOT
+                    # blocked, which is the honest record.
                     do_clear = False
                     logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
 
-        # ── STEP 2: report to backend (60 s per-platform cooldown) ────────────
-        with self._lock:
-            since_alert = now - self._last_alerted.get(detected_plat, 0.0)
-            do_alert    = since_alert >= _ALERT_COOLDOWN
-            if do_alert:
-                self._last_alerted[detected_plat] = now
+        # ── STEP 2: report to backend ─────────────────────────────────────────
+        # EVERY blocked attempt is reported. It used to be one per 60s per
+        # platform, which meant someone working through a customer table one
+        # record at a time -- twenty copies, twenty blocks -- produced a
+        # single incident. An analyst reading that sees one accidental paste
+        # rather than a systematic attempt, so the throttle was hiding
+        # precisely the pattern worth seeing.
+        #
+        # What stops this becoming a flood is `fresh_attempt`: the delayed loop
+        # (_ai_monitor_loop) re-checks a stale flag once a second without
+        # consulting the clipboard, so "did this call actually take content
+        # OFF the clipboard" is what separates the user copying again from the
+        # loop looking again. ALERT never clears and so has no such signal --
+        # it keeps the timer, which is defensible for a policy whose whole
+        # point is to notice rather than intervene.
+        if action == "ALERT":
+            with self._lock:
+                since_alert = now - self._last_alerted.get(detected_plat, 0.0)
+                do_alert    = since_alert >= _ALERT_COOLDOWN
+                if do_alert:
+                    self._last_alerted[detected_plat] = now
+        else:
+            do_alert = fresh_attempt
+
+        # The POPUP stays throttled on time even though the incident is not.
+        # One interruption a minute is plenty -- being asked to justify
+        # yourself on every keystroke is how a DLP tool gets switched off --
+        # but a row in a table costs the user nothing and should tell the
+        # truth about how many attempts there were.
+        do_prompt = False
+        if do_alert:
+            with self._lock:
+                since_prompt = now - self._last_prompted.get(detected_plat, 0.0)
+                do_prompt    = since_prompt >= _ALERT_COOLDOWN
+                if do_prompt:
+                    self._last_prompted[detected_plat] = now
 
         if do_alert:
             if do_clear:
@@ -549,7 +596,7 @@ class AiBlocker:
             elif action == "ALERT":
                 status_word = "DETECTED (ALERT-only policy)"
             else:
-                status_word = "DETECTED (NOT cleared -- clear cooldown active)"
+                status_word = "DETECTED (clipboard clear FAILED)"
             logger.critical(
                 f"[AI-MONITOR] !! DATA LEAK {status_word} -- "
                 f"{detected_plat} | {detected_source} | via={source_tag}"
@@ -563,7 +610,7 @@ class AiBlocker:
             # ChatGPT going through untouched.
             def _report(pol=policy, plat=detected_plat, cleared=do_clear,
                         sample=(content_sample or detected_source)[:100],
-                        risk=risk_score):
+                        risk=risk_score, prompt=do_prompt):
                 attempt = self._client.report_ai_leak_attempt(
                     agent_id=self._agent_id,
                     policy_id=pol.get("id"),
@@ -578,7 +625,7 @@ class AiBlocker:
                         f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
                         f"status={'BLOCKED' if cleared else 'ALERTED'}"
                     )
-                    if cleared and attempt.get("id"):
+                    if cleared and prompt and attempt.get("id"):
                         self._offer_review_request(attempt["id"], pol, plat)
                 else:
                     logger.error("[AI-MONITOR] Failed to report incident to backend")

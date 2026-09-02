@@ -8,17 +8,29 @@ import ai_domain_monitor as aidm
 from ai_domain_monitor import AiBlocker, _detect_platform_in_text, _is_browser_window, _ai_monitor_loop
 
 
+def _join_report_threads(timeout=2):
+    """Reporting runs on a daemon thread, so assertions about it must wait."""
+    for t in threading.enumerate():
+        if t.name in ("ai-monitor-report", "review-prompt"):
+            t.join(timeout=timeout)
+
 @pytest.fixture(autouse=True)
 def _clipboard_holds_sensitive_content():
-    """The blocker now reads the clipboard before writing, so that it never
-    rewrites its own block message (which otherwise turns the delayed path's
-    1s re-checks into a stream of clipboard overwrites).
+    """Two module-wide stubs every block test in this file assumes.
 
-    Every block test here means "the user just copied something sensitive",
-    so the default is a clipboard that is NOT already cleared. A test about
-    the already-cleared case patches paste itself.
+    pyperclip.paste: the blocker reads the clipboard before writing, so that
+    it never rewrites its own block message (which otherwise turned the
+    delayed path's 1s re-checks into a stream of clipboard overwrites). Every
+    block test here means "the user just copied something sensitive", so the
+    default is a clipboard that is NOT already cleared; a test about the
+    already-cleared case patches paste itself.
+
+    prompt_review_request: several tests reach code that spawns the
+    review-prompt thread, and unstubbed, that thread opens a real tkinter
+    dialog and blocks forever. Harmless while nothing waited on it, 2s of
+    dead time per join once something did.
     """
-    with patch("ai_domain_monitor.pyperclip.paste", return_value="Sarah Okafor, Manchester"):
+    with patch("ai_domain_monitor.pyperclip.paste", return_value="Sarah Okafor, Manchester"),          patch("ai_domain_monitor.prompt_review_request", return_value=None):
         yield
 
 
@@ -196,14 +208,81 @@ class TestAiBlocker:
                 blocker.check_and_block(t_detect=time.monotonic())
         mock_copy.assert_not_called()
 
-    def test_alert_report_respects_per_platform_cooldown(self):
+    def test_every_blocked_attempt_is_reported_not_one_per_minute(self):
+        """Incidents are no longer throttled; the popup still is.
+
+        This test was previously named ..._alert_report_respects_per_platform
+        _cooldown but ran the default BLOCK policy, and asserted exactly one
+        incident for two blocked copies. That is how someone working through a
+        customer table -- twenty copies, twenty blocks -- filed as a single
+        incident, so the Incidents page showed one accidental paste instead of
+        a systematic attempt. The throttle hid the pattern worth seeing.
+        """
         blocker, client = self._make_blocker()
-        with patch.object(blocker, "_detect_platform", return_value=("GROK", "window='Grok'")):
-            with patch("ai_domain_monitor.pyperclip.copy"):
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "window='Grok'")), \
+             patch("ai_domain_monitor.prompt_review_request", return_value=None), \
+             patch("ai_domain_monitor.pyperclip.copy"):
+            for _ in range(3):
                 blocker.check_and_block(t_detect=time.monotonic())
-                blocker.check_and_block(t_detect=time.monotonic())  # within 60s alert cooldown
+            _join_report_threads()
+
+        assert client.report_ai_leak_attempt.call_count == 3
+
+    def test_the_delayed_recheck_of_an_already_clear_clipboard_reports_nothing(self):
+        # The counterpart. _ai_monitor_loop re-checks a stale flag once a
+        # second without consulting the clipboard, so without this the change
+        # above would file an incident every second for half a minute.
+        blocker, client = self._make_blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.paste", return_value=aidm._DLP_BLOCK_MSG), \
+             patch("ai_domain_monitor.pyperclip.copy"):
+            for _ in range(10):
+                blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        client.report_ai_leak_attempt.assert_not_called()
+
+    def test_a_failed_clear_is_still_reported_and_marked_not_blocked(self):
+        # The most important record in this file: the clear did not work, so
+        # the data went through and nobody stopped it. It must never be
+        # silently dropped as "not a fresh attempt".
+        blocker, client = self._make_blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy", side_effect=RuntimeError("clipboard busy")):
+            blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        client.report_ai_leak_attempt.assert_called_once()
+        assert client.report_ai_leak_attempt.call_args.kwargs["blocked"] is False
+
+    def test_an_alert_policy_still_throttles_its_reports(self):
+        # ALERT never clears, so it has no clipboard signal to tell a new copy
+        # from a re-check -- it keeps the 60s timer, which is defensible for a
+        # policy whose whole point is to notice rather than intervene.
+        client = MagicMock()
+        client.report_ai_leak_attempt.return_value = {"id": "a1"}
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "ALERT", "name": "Alert"}
+        blocker = AiBlocker(client, "agent-1", policy_resolver=resolver)
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")):
+            for _ in range(3):
+                blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
 
         assert client.report_ai_leak_attempt.call_count == 1
+
+    def test_the_review_prompt_is_still_shown_only_once_a_minute(self):
+        # Three blocked attempts, three incidents -- but one interruption.
+        blocker, client = self._make_blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.prompt_review_request", return_value=None) as mock_prompt:
+            for _ in range(3):
+                blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        assert client.report_ai_leak_attempt.call_count == 3
+        assert mock_prompt.call_count == 1
 
     def test_different_platforms_have_independent_alert_cooldowns(self):
         blocker, client = self._make_blocker()
