@@ -69,6 +69,7 @@ describe('GET /api/ueba/risk-score/:userId — priority content', () => {
         avgWorkingHourStart: 9,
         avgWorkingHourEnd: 17,
         avgUsbFrequency: 0,
+        activeDaysObserved: 30,
         riskScore: 0,
         lastUpdated: new Date(),
         ...overrides,

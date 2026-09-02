@@ -39,10 +39,18 @@ async function recomputeBaseline({ userId, days = 30, department }) {
     if (!perDay.has(key)) perDay.set(key, { files: 0, volumeMB: 0, usb: 0 });
     const day = perDay.get(key);
 
+    // Working hours come from ANY event that carries one, not just file
+    // access. The agent stamps `hour` on CLIPBOARD_COPY too, and this branch
+    // used to discard it -- while the scorer (routes/ueba.js) collects today's
+    // hours from every event type. The baseline was therefore built from a
+    // narrower set of events than it was compared against, which is how a user
+    // whose activity is mostly clipboard ends up with a one-hour window and
+    // reads as 86% out-of-hours while working an ordinary morning.
+    if (typeof e.metadata?.hour === 'number') hours.push(e.metadata.hour);
+
     if (e.eventType === 'FILE_ACCESS' || e.eventType === 'AFTER_HOURS_ACCESS') {
       day.files += Number(e.metadata?.count) || 0;
       day.volumeMB += Number(e.metadata?.sizeMB) || 0;
-      if (typeof e.metadata?.hour === 'number') hours.push(e.metadata.hour);
     } else if (e.eventType === 'USB_INSERT') {
       day.usb += 1;
       usbInserts += 1;
@@ -85,6 +93,10 @@ async function recomputeBaseline({ userId, days = 30, department }) {
     avgWorkingHourStart: percentile(0.1) ?? existing?.avgWorkingHourStart ?? 9,
     avgWorkingHourEnd: percentile(0.9) ?? existing?.avgWorkingHourEnd ?? 18,
     avgUsbFrequency: round2(medianUsb),
+    // Recorded so the scorer can tell a baseline worth trusting from one
+    // built out of a single afternoon. See UserBehaviorBaseline in the schema
+    // and MIN_ACTIVE_DAYS in ueba-scoring.
+    activeDaysObserved: activeDays.length,
     lastUpdated: new Date(),
   };
 

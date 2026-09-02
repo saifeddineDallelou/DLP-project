@@ -74,6 +74,11 @@ export const RISK_LEVEL_TONES = {
   LOW:    { text: 'text-severity-low-text',    bar: 'bg-severity-low'    },
   MEDIUM: { text: 'text-severity-medium-text', bar: 'bg-severity-medium' },
   HIGH:   { text: 'text-severity-high-text',   bar: 'bg-severity-high'   },
+  // Deliberately neutral, not green. LEARNING means "not observed enough to
+  // judge", which is not the same claim as LOW, and colouring it like a clean
+  // result would tell an admin a brand-new employee is safe when nobody has
+  // watched them work yet.
+  LEARNING: { text: 'text-ink-faint',          bar: 'bg-white/15'        },
 };
 
 export function riskLevelFor(score) {

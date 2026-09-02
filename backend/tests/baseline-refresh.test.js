@@ -23,6 +23,7 @@ async function baseline(userId, { lastUpdated, ...rest } = {}) {
       avgWorkingHourStart: 9,
       avgWorkingHourEnd: 18,
       avgUsbFrequency: 0,
+      activeDaysObserved: 30,
       riskScore: 0,
       lastUpdated: lastUpdated ?? new Date(),
       ...rest,

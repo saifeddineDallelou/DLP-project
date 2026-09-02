@@ -1,6 +1,7 @@
 const request = require('supertest');
 const app = require('../src/app');
 const { prisma, resetDb, createUser, authHeader, createAgent } = require('./helpers');
+const { recomputeBaseline } = require('../src/lib/baseline');
 
 afterEach(resetDb);
 afterAll(() => prisma.$disconnect());
@@ -247,6 +248,7 @@ describe('GET /api/ueba/risk-score/:userId', () => {
       data: {
         userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 5,
         avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 0,
+        activeDaysObserved: 30,
         riskScore: 0.2, lastUpdated: new Date(),
       },
     });
@@ -286,6 +288,7 @@ describe('GET /api/ueba/risk-score/:userId', () => {
       data: {
         userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 5,
         avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 0,
+        activeDaysObserved: 30,
         riskScore: 0.2, lastUpdated: new Date(),
       },
     });
@@ -341,5 +344,300 @@ describe('GET /api/ueba/risk-score/:userId', () => {
     expect(res.body.baseline).toMatchObject({
       avgDailyFiles: 3.33, avgDailyVolumeMB: 0, avgWorkingHourStart: 8, avgWorkingHourEnd: 19, avgUsbFrequency: 0.1,
     });
+  });
+});
+
+describe('UEBA learning period', () => {
+  // The failure this prevents: a freshly deployed agent produces a baseline
+  // like "works 12:00-12:00, one file a day". Every ordinary morning after
+  // that reads as after-hours, DOMINANT_SIGNAL_FACTOR lets that one metric
+  // clear HIGH unaided, and an entire rollout flags on day two -- because on
+  // day one the system had never seen anyone work.
+
+  async function thinBaseline(userId, activeDaysObserved) {
+    return prisma.userBehaviorBaseline.create({
+      data: {
+        userId,
+        avgDailyFiles: 1,
+        avgDailyVolumeMB: 0,
+        // The degenerate window a single afternoon of observation produces.
+        avgWorkingHourStart: 12,
+        avgWorkingHourEnd: 12,
+        avgUsbFrequency: 0,
+        activeDaysObserved,
+        riskScore: 0,
+        lastUpdated: new Date(),
+      },
+    });
+  }
+
+  test('a thin baseline reports LEARNING, not a risk band', async () => {
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await thinBaseline(user.id, 1);
+    // Ordinary morning activity, well outside the degenerate 12-12 window.
+    for (const hour of [9, 9, 10, 10]) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+                metadata: { count: 1, sizeMB: 0, hour } },
+      });
+    }
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.status).toBe(200);
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.learning).toEqual({
+      activeDaysObserved: 1,
+      activeDaysRequired: 7,
+      hasBaseline: true,
+    });
+    // No deviation judgement is made at all -- the components that would
+    // otherwise report "4 of 4 outside 12-12h" are simply not computed.
+    expect(res.body.deviationScore).toBe(0);
+    expect(res.body.components).toEqual({});
+  });
+
+  test('without the gate the same data would score HIGH', async () => {
+    // Pins WHY the gate exists rather than merely that it is there: the exact
+    // same events against the exact same numbers, with enough observed days
+    // to be trusted, produce a HIGH from the hours metric alone.
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await thinBaseline(user.id, 30);
+    for (const hour of [9, 9, 10, 10]) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+                metadata: { count: 1, sizeMB: 0, hour } },
+      });
+    }
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('HIGH');
+    expect(res.body.components.hours.signal).toBe(1);
+  });
+
+  test('absolute signals still surface during learning', async () => {
+    // A large transfer or a PCI-DSS block needs no baseline to be meaningful,
+    // so learning withholds the deviation JUDGEMENT, not the facts.
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await thinBaseline(user.id, 1);
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'LARGE_FILE_TRANSFER',
+              metadata: { sizeMB: 900 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.eventBonus).toBeGreaterThan(0);
+    expect(res.body.last24h.largeFileTransfers).toBe(1);
+  });
+
+  test('a user with no baseline at all is LEARNING with hasBaseline false', async () => {
+    const { user } = await createUser();
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.learning.hasBaseline).toBe(false);
+    expect(res.body.learning.activeDaysObserved).toBe(0);
+  });
+
+  test('a baseline predating the field is treated as not yet trusted', async () => {
+    // activeDaysObserved defaults to 0 for rows written before it existed. We
+    // do not know what they rest on, so they are not trusted until the hourly
+    // refresh recomputes them -- the safe direction.
+    const { user } = await createUser();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 100,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 1,
+        riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.learning.activeDaysObserved).toBe(0);
+  });
+
+  test('recompute records how many active days it observed', async () => {
+    const agent = await createAgent();
+    const day = (n, hour) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      d.setHours(hour, 0, 0, 0);
+      return d;
+    };
+    for (const n of [1, 2, 3]) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: 'counted-user', eventType: 'FILE_ACCESS',
+                metadata: { count: 2, sizeMB: 1, hour: 10 }, timestamp: day(n, 10) },
+      });
+    }
+
+    const b = await recomputeBaseline({ userId: 'counted-user', days: 30 });
+    // The count was ALREADY being computed and returned in computedFrom -- it
+    // was simply never persisted, so the scorer could not see it.
+    expect(b.computedFrom.activeDays).toBe(3);
+    expect(b.baseline.activeDaysObserved).toBe(3);
+  });
+});
+
+describe('working-hours baseline sources', () => {
+  // Regression: the baseline collected `hour` only from FILE_ACCESS /
+  // AFTER_HOURS_ACCESS, while the scorer collects today's hours from EVERY
+  // event type. A user whose activity is mostly clipboard therefore had a
+  // window built from a handful of file events and was then judged against
+  // all of it -- which is how a real profile ended up with a 12-12h window
+  // and read as 86% out-of-hours during an ordinary morning.
+  test('clipboard events contribute to the working-hours window', async () => {
+    const agent = await createAgent();
+    const day = (n, hour) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      d.setHours(hour, 0, 0, 0);
+      return d;
+    };
+
+    // One file event at noon, six clipboard events across the morning --
+    // the shape that produced the bug.
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: 'clip-user', eventType: 'FILE_ACCESS',
+              metadata: { count: 1, sizeMB: 0, hour: 12 }, timestamp: day(1, 12) },
+    });
+    for (const [n, hour] of [[1, 9], [1, 9], [2, 9], [2, 10], [3, 10], [3, 10]]) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: 'clip-user', eventType: 'CLIPBOARD_COPY',
+                metadata: { count: 1, hour }, timestamp: day(n, hour) },
+      });
+    }
+
+    const { baseline } = await recomputeBaseline({ userId: 'clip-user', days: 30 });
+
+    // Built from all seven hours, not the single file event: a real window.
+    expect(baseline.avgWorkingHourStart).toBe(9);
+    expect(baseline.avgWorkingHourEnd).toBeGreaterThan(9);
+    expect(baseline.avgWorkingHourStart).not.toBe(baseline.avgWorkingHourEnd);
+  });
+
+  test('clipboard events do not inflate the file or volume baseline', async () => {
+    // The hour is shared; the counts are not. A clipboard copy is not a file
+    // touched and carries no bytes.
+    const agent = await createAgent();
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: 'clip-only', eventType: 'CLIPBOARD_COPY',
+              metadata: { count: 5, hour: 10 } },
+    });
+
+    const { baseline } = await recomputeBaseline({ userId: 'clip-only', days: 30 });
+    expect(baseline.avgDailyFiles).toBe(0);
+    expect(baseline.avgDailyVolumeMB).toBe(0);
+    expect(baseline.avgWorkingHourStart).toBe(10);
+  });
+});
+
+describe('policy violations during the learning period', () => {
+  // The hole the first version of the learning gate opened: LEARNING replaced
+  // the risk band outright, so a 4 GB dump at 3am on a user's SECOND day
+  // rendered as a calm grey "building baseline" card -- while eventBonus and
+  // priorityBoost sat pegged at their caps and the score read 0.6.
+  //
+  // Two kinds of detection, only one of which needs a baseline:
+  //   anomaly -- "is this unusual FOR YOU"      -> withheld during learning
+  //   policy  -- "is this bad regardless"        -> must still fire
+  async function thinUser(userId) {
+    const agent = await createAgent();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId, avgDailyFiles: 5, avgDailyVolumeMB: 10,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 0,
+        activeDaysObserved: 2, riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+    return agent;
+  }
+
+  test('a thin baseline with real policy violations reports a real band', async () => {
+    const { user } = await createUser();
+    const agent = await thinUser(user.id);
+    for (let i = 0; i < 4; i++) {
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'AFTER_HOURS_ACCESS',
+                metadata: { count: 50, sizeMB: 200, hour: 3 } },
+      });
+      await prisma.behaviorEvent.create({
+        data: { agentId: agent.id, userId: user.id, eventType: 'LARGE_FILE_TRANSFER',
+                metadata: { sizeMB: 1200, hour: 3 } },
+      });
+    }
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).not.toBe('LEARNING');
+    expect(['MEDIUM', 'HIGH']).toContain(res.body.riskLevel);
+    // The caveat is still true and still reported alongside the alarm.
+    expect(res.body.learning.activeDaysObserved).toBe(2);
+    expect(res.body.scoredOn).toBe('policy');
+    // The behavioural half really is withheld -- this is not a band derived
+    // from a baseline nobody should trust.
+    expect(res.body.deviationScore).toBe(0);
+    expect(res.body.components).toEqual({});
+  });
+
+  test('a quiet user on a thin baseline still reports LEARNING, not LOW', async () => {
+    // LOW would be a claim about behaviour, and no behaviour has been learned.
+    const { user } = await createUser();
+    const agent = await thinUser(user.id);
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+              metadata: { count: 3, sizeMB: 1, hour: 10 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.riskLevel).toBe('LEARNING');
+    expect(res.body.scoredOn).toBe('policy');
+  });
+
+  test('an established user reports that both halves are in play', async () => {
+    const { user } = await createUser();
+    const agent = await createAgent();
+    await prisma.userBehaviorBaseline.create({
+      data: {
+        userId: user.id, avgDailyFiles: 10, avgDailyVolumeMB: 100,
+        avgWorkingHourStart: 9, avgWorkingHourEnd: 17, avgUsbFrequency: 1,
+        activeDaysObserved: 30, riskScore: 0, lastUpdated: new Date(),
+      },
+    });
+    await prisma.behaviorEvent.create({
+      data: { agentId: agent.id, userId: user.id, eventType: 'FILE_ACCESS',
+              metadata: { count: 9, sizeMB: 90, hour: 11 } },
+    });
+
+    const res = await request(app)
+      .get(`/api/ueba/risk-score/${user.id}`)
+      .set('Authorization', authHeader(user));
+
+    expect(res.body.scoredOn).toBe('behaviour+policy');
+    expect(res.body.learning).toBeNull();
+    expect(res.body.riskLevel).toBe('LOW');
   });
 });

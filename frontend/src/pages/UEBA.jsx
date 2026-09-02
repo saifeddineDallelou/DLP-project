@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Activity, RefreshCw, TrendingUp, User, ShieldAlert } from 'lucide-react';
+import { Activity, RefreshCw, TrendingUp, User, ShieldAlert, AlertTriangle } from 'lucide-react';
 import api from '../services/api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
@@ -70,6 +70,12 @@ function ComponentRow({ metricKey, c }) {
 
 function RiskProfileCard({ profile }) {
   const tone = RISK_LEVEL_TONES[profile.riskLevel] ?? RISK_LEVEL_TONES.LOW;
+  // Present whenever the baseline is too thin to score DEVIATIONS from --
+  // which is independent of whether today looks alarming. A user two days in
+  // who trips real policy violations gets a real band AND this caveat.
+  const learning = profile.learning ?? null;
+  // Quiet and unbaselined: nothing to show a band for yet.
+  const stillLearning = profile.riskLevel === 'LEARNING';
   const hasBreakdown = profile.components && Object.keys(profile.components).length > 0;
   return (
     <div className="card">
@@ -89,16 +95,51 @@ function RiskProfileCard({ profile }) {
         <span className={`badge text-[10px] ${tone.text} bg-white/5`}>{profile.riskLevel}</span>
       </div>
 
-      <div className="flex items-end justify-between mb-2">
-        <span className="text-[11px] text-ink-faint">Live risk score</span>
-        <span className={`text-lg font-bold tabular-nums ${tone.text}`}>
-          {Math.round(profile.liveRiskScore * 100)}%
-        </span>
-      </div>
-      <div className="w-full h-2 bg-surface-elevated rounded-full overflow-hidden mb-3">
-        <div className={`h-full rounded-full ${tone.bar} transition-all duration-500`}
-             style={{ width: `${Math.round(profile.liveRiskScore * 100)}%` }} />
-      </div>
+      {stillLearning ? (
+        // A progress bar toward being scorable, not a risk bar. Showing a
+        // percentage here would read as "12% risky" when it means "12% of the
+        // way to knowing anything about this person".
+        <>
+          <div className="flex items-end justify-between mb-2">
+            <span className="text-[11px] text-ink-faint">Building baseline</span>
+            <span className="text-lg font-bold tabular-nums text-ink-faint">
+              {learning.activeDaysObserved}/{learning.activeDaysRequired}
+              <span className="text-[11px] font-normal ml-1">days</span>
+            </span>
+          </div>
+          <div className="w-full h-2 bg-surface-elevated rounded-full overflow-hidden mb-3">
+            <div className="h-full rounded-full bg-white/25 transition-all duration-500"
+                 style={{ width: `${Math.min(100, Math.round(
+                   (learning.activeDaysObserved / learning.activeDaysRequired) * 100))}%` }} />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex items-end justify-between mb-2">
+            <span className="text-[11px] text-ink-faint">Live risk score</span>
+            <span className={`text-lg font-bold tabular-nums ${tone.text}`}>
+              {Math.round(profile.liveRiskScore * 100)}%
+            </span>
+          </div>
+          <div className="w-full h-2 bg-surface-elevated rounded-full overflow-hidden mb-3">
+            <div className={`h-full rounded-full ${tone.bar} transition-all duration-500`}
+                 style={{ width: `${Math.round(profile.liveRiskScore * 100)}%` }} />
+          </div>
+        </>
+      )}
+
+      {learning && !stillLearning && (
+        // The alarm is real and rests on policy violations, which need no
+        // history. What is missing is the behavioural half -- say so rather
+        // than letting the band imply a completeness it does not have.
+        <div className="flex items-start gap-1.5 mb-3 px-2 py-1.5 rounded-lg bg-white/5 border border-border">
+          <AlertTriangle size={11} className="text-severity-medium-text shrink-0 mt-0.5" />
+          <p className="text-[10px] text-ink-faint leading-snug">
+            Scored on policy violations only — baseline {learning.activeDaysObserved}/
+            {learning.activeDaysRequired} days, so deviation scoring is not active yet.
+          </p>
+        </div>
+      )}
 
       {hasBreakdown ? (
         <div className="pt-2 border-t border-border">
@@ -133,8 +174,11 @@ function RiskProfileCard({ profile }) {
       ) : (
         <div className="pt-2 border-t border-border">
           <p className="text-[10px] text-ink-faint">
-            No baseline yet — score reflects event counts only. Recompute below to
-            establish what is normal for this user.
+            {learning
+              ? `Not enough observed activity to judge this user yet — ${learning.activeDaysObserved} of `
+                + `${learning.activeDaysRequired} days. Behaviour is being recorded; deviation scoring `
+                + `starts once there is a normal to compare against. Any blocked leaks below still count.`
+              : 'No baseline yet — score reflects event counts only.'}
           </p>
         </div>
       )}

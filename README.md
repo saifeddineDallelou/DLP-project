@@ -248,7 +248,7 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 252
+cd backend    && npm test            # 263
 cd agent      && python -m pytest -q # 366
 cd classifier && python -m pytest -q # 96
 cd frontend   && npm test            # 30
