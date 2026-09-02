@@ -185,7 +185,7 @@ cd agent
 pip install -r requirements.txt
 cp .env.example .env                           # then edit WATCH_DIRS
 python src/main.py
-python -m pytest -q                            # 364 tests
+python -m pytest -q                            # 366 tests
 ```
 
 **Data-at-rest discovery.** Every monitor above reacts to *activity*. None of
@@ -248,8 +248,8 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 246
-cd agent      && python -m pytest -q # 364
+cd backend    && npm test            # 252
+cd agent      && python -m pytest -q # 366
 cd classifier && python -m pytest -q # 96
 cd frontend   && npm test            # 30
 ```

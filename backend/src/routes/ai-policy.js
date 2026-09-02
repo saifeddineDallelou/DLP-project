@@ -153,6 +153,40 @@ router.get('/attempts', authenticate, async (req, res, next) => {
 // PATCH /api/ai-policy/attempt/:id/request-review  (agent-token only -- the
 // block is silent for the end user; this just flags it with an optional note
 // asking an admin to take a look. Never unblocks/restores anything itself.)
+// PATCH /api/ai-policy/attempt/:id/repeat  (agent-facing -- the same attempt
+// was made again inside the reporting window)
+//
+// The agent blocks EVERY attempt, but filing a fresh row for each one buries
+// the queue, and filing only the first one under a time throttle is worse:
+// it reports a persistent attempt as a single accident. Counting keeps one
+// row per window and lets it say how many tries it represents.
+router.patch('/attempt/:id/repeat', async (req, res, next) => {
+  try {
+    const agentToken = req.headers['x-agent-token'];
+    if (!agentToken) return res.status(401).json({ error: 'x-agent-token required' });
+
+    const attempt = await prisma.aiLeakAttempt.findUnique({ where: { id: req.params.id } });
+    if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+
+    const agent = await prisma.agent.findUnique({ where: { id: attempt.agentId } });
+    if (!agent || agent.token !== agentToken) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Incremented in the database rather than read-modify-written here: the
+    // agent's monitors report from several threads, and a lost update would
+    // undercount exactly the burst this field exists to measure.
+    const updated = await prisma.aiLeakAttempt.update({
+      where: { id: req.params.id },
+      data: { attempts: { increment: 1 }, lastAttemptAt: new Date() },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.patch('/attempt/:id/request-review', async (req, res, next) => {
   try {
     const agentToken = req.headers['x-agent-token'];

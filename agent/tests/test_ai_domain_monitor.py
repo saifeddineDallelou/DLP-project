@@ -208,25 +208,81 @@ class TestAiBlocker:
                 blocker.check_and_block(t_detect=time.monotonic())
         mock_copy.assert_not_called()
 
-    def test_every_blocked_attempt_is_reported_not_one_per_minute(self):
-        """Incidents are no longer throttled; the popup still is.
+    def test_repeats_inside_the_window_are_counted_not_refiled(self):
+        """One row per window, carrying how many attempts it represents.
 
-        This test was previously named ..._alert_report_respects_per_platform
-        _cooldown but ran the default BLOCK policy, and asserted exactly one
-        incident for two blocked copies. That is how someone working through a
-        customer table -- twenty copies, twenty blocks -- filed as a single
-        incident, so the Incidents page showed one accidental paste instead of
-        a systematic attempt. The throttle hid the pattern worth seeing.
+        The three options, and why this is the one: dropping repeats under a
+        timer reported twenty blocked copies as a single incident reading
+        "1", indistinguishable from one accidental paste. Filing a row per
+        attempt is honest but buries the queue and makes the reader count by
+        hand. Counting states the same thing once.
         """
         blocker, client = self._make_blocker()
+        client.report_ai_leak_attempt.return_value = {"id": "attempt-1"}
+        client.repeat_ai_leak_attempt.return_value = {"id": "attempt-1", "attempts": 2}
+
         with patch.object(blocker, "_detect_platform", return_value=("GROK", "window='Grok'")), \
-             patch("ai_domain_monitor.prompt_review_request", return_value=None), \
              patch("ai_domain_monitor.pyperclip.copy"):
-            for _ in range(3):
+            for _ in range(4):
                 blocker.check_and_block(t_detect=time.monotonic())
             _join_report_threads()
 
-        assert client.report_ai_leak_attempt.call_count == 3
+        # One row opened, three repeats counted onto it.
+        assert client.report_ai_leak_attempt.call_count == 1
+        assert client.repeat_ai_leak_attempt.call_count == 3
+        for call in client.repeat_ai_leak_attempt.call_args_list:
+            assert call.args[0] == "attempt-1"
+
+    def test_a_new_window_opens_a_new_row(self):
+        # Once the window lapses, the next attempt starts a fresh row rather
+        # than counting onto an hour-old one.
+        blocker, client = self._make_blocker()
+        client.report_ai_leak_attempt.side_effect = [{"id": "a1"}, {"id": "a2"}]
+        client.repeat_ai_leak_attempt.return_value = {"id": "a1", "attempts": 2}
+
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"):
+            blocker.check_and_block(t_detect=time.monotonic())
+            blocker.check_and_block(t_detect=time.monotonic())   # repeat onto a1
+            _join_report_threads()
+            # Age the window out.
+            with blocker._lock:
+                blocker._last_alerted["GROK"] -= (aidm._ALERT_COOLDOWN + 1)
+                blocker._last_prompted["GROK"] -= (aidm._ALERT_COOLDOWN + 1)
+            blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        assert client.report_ai_leak_attempt.call_count == 2
+        assert client.repeat_ai_leak_attempt.call_count == 1
+
+    def test_a_repeat_onto_a_vanished_row_files_a_new_one(self):
+        # If the row is gone, an uncounted block is worse than a duplicate.
+        blocker, client = self._make_blocker()
+        client.report_ai_leak_attempt.side_effect = [{"id": "a1"}, {"id": "a2"}]
+        client.repeat_ai_leak_attempt.return_value = None   # 404 / backend down
+
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"):
+            blocker.check_and_block(t_detect=time.monotonic())
+            blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        assert client.repeat_ai_leak_attempt.call_count == 1
+        assert client.report_ai_leak_attempt.call_count == 2
+
+    def test_the_review_prompt_is_still_shown_only_once_a_minute(self):
+        # Four blocked attempts, one row, one interruption.
+        blocker, client = self._make_blocker()
+        client.report_ai_leak_attempt.return_value = {"id": "attempt-1"}
+        client.repeat_ai_leak_attempt.return_value = {"id": "attempt-1", "attempts": 2}
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.prompt_review_request", return_value=None) as mock_prompt:
+            for _ in range(4):
+                blocker.check_and_block(t_detect=time.monotonic())
+            _join_report_threads()
+
+        assert mock_prompt.call_count == 1
 
     def test_the_delayed_recheck_of_an_already_clear_clipboard_reports_nothing(self):
         # The counterpart. _ai_monitor_loop re-checks a stale flag once a
@@ -270,19 +326,6 @@ class TestAiBlocker:
             _join_report_threads()
 
         assert client.report_ai_leak_attempt.call_count == 1
-
-    def test_the_review_prompt_is_still_shown_only_once_a_minute(self):
-        # Three blocked attempts, three incidents -- but one interruption.
-        blocker, client = self._make_blocker()
-        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
-             patch("ai_domain_monitor.pyperclip.copy"), \
-             patch("ai_domain_monitor.prompt_review_request", return_value=None) as mock_prompt:
-            for _ in range(3):
-                blocker.check_and_block(t_detect=time.monotonic())
-            _join_report_threads()
-
-        assert client.report_ai_leak_attempt.call_count == 3
-        assert mock_prompt.call_count == 1
 
     def test_different_platforms_have_independent_alert_cooldowns(self):
         blocker, client = self._make_blocker()

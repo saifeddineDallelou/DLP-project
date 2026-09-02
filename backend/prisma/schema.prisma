@@ -172,6 +172,13 @@ model AiLeakAttempt {
   riskScore     Float     @map("risk_score")
   blocked       Boolean   @default(true)
   timestamp     DateTime  @default(now())
+  // How many times this same attempt was made inside one reporting window.
+  // A single row with attempts=23 says "someone tried 23 times" -- twenty
+  // three near-identical rows say the same thing far less clearly, and one
+  // row saying 1 (which is what a per-window throttle produced) actively
+  // misleads: it reads as a one-off accident.
+  attempts      Int       @default(1)
+  lastAttemptAt DateTime? @map("last_attempt_at")
   // See the matching fields on Incident for the reasoning.
   reviewRequested Boolean @default(false) @map("review_requested")
   justification   String?

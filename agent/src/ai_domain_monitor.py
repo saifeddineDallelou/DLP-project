@@ -303,9 +303,12 @@ class AiBlocker:
         # platform's still-cooling-down clear timer).
         self._last_clip_clear: dict[str, float] = {}
         self._last_alerted: dict[str, float]    = {}
-        # Separate from _last_alerted: incidents are no longer throttled, but
-        # the review prompt still is -- one interruption per minute.
+        # Separate from _last_alerted: the review prompt is throttled on its
+        # own timer, so it stays quiet even as repeats keep being counted.
         self._last_prompted: dict[str, float]   = {}
+        # platform -> id of the attempt row the current window is counting
+        # onto. Cleared when a window closes, so a new burst opens a new row.
+        self._open_attempt: dict[str, str]      = {}
 
         # Process scan cache shared between the two threads
         self._proc_cache: tuple[str | None, str] = (None, "")
@@ -554,19 +557,23 @@ class AiBlocker:
                     logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
 
         # ── STEP 2: report to backend ─────────────────────────────────────────
-        # EVERY blocked attempt is reported. It used to be one per 60s per
-        # platform, which meant someone working through a customer table one
-        # record at a time -- twenty copies, twenty blocks -- produced a
-        # single incident. An analyst reading that sees one accidental paste
-        # rather than a systematic attempt, so the throttle was hiding
-        # precisely the pattern worth seeing.
+        # EVERY attempt reaches the backend, but repeats inside a 60s window
+        # increment a COUNTER on the existing row instead of filing a new one.
         #
-        # What stops this becoming a flood is `fresh_attempt`: the delayed loop
+        # The three ways to handle a burst, and why this is the one:
+        #   * one row per 60s, extras dropped  -- what this used to do. Twenty
+        #     blocked copies filed as a single incident reading "1", which is
+        #     indistinguishable from one accidental paste. It hid the pattern.
+        #   * one row per attempt -- honest, but twenty near-identical rows
+        #     bury the queue and still make the reader count them by hand.
+        #   * one row saying "23 attempts" -- same information, stated once.
+        #
+        # `fresh_attempt` is what makes any of it safe: the delayed loop
         # (_ai_monitor_loop) re-checks a stale flag once a second without
-        # consulting the clipboard, so "did this call actually take content
-        # OFF the clipboard" is what separates the user copying again from the
-        # loop looking again. ALERT never clears and so has no such signal --
-        # it keeps the timer, which is defensible for a policy whose whole
+        # consulting the clipboard, so "was sensitive content actually ON the
+        # clipboard for this call" separates the user copying again from the
+        # loop merely looking again. ALERT never clears and so has no such
+        # signal -- it keeps the plain timer, defensible for a policy whose
         # point is to notice rather than intervene.
         if action == "ALERT":
             with self._lock:
@@ -574,16 +581,28 @@ class AiBlocker:
                 do_alert    = since_alert >= _ALERT_COOLDOWN
                 if do_alert:
                     self._last_alerted[detected_plat] = now
+            repeat_of = None
         else:
             do_alert = fresh_attempt
+            repeat_of = None
+            if do_alert:
+                with self._lock:
+                    since_alert = now - self._last_alerted.get(detected_plat, 0.0)
+                    if since_alert < _ALERT_COOLDOWN:
+                        # Still inside the window: count against the row that
+                        # opened it, if we still know which one that was.
+                        repeat_of = self._open_attempt.get(detected_plat)
+                    if repeat_of is None:
+                        # Opening a new window -- the next row becomes the one
+                        # repeats accumulate onto.
+                        self._last_alerted[detected_plat] = now
 
-        # The POPUP stays throttled on time even though the incident is not.
-        # One interruption a minute is plenty -- being asked to justify
-        # yourself on every keystroke is how a DLP tool gets switched off --
-        # but a row in a table costs the user nothing and should tell the
-        # truth about how many attempts there were.
+        # The POPUP is throttled on the same window. One interruption a minute
+        # is plenty -- being asked to justify yourself on every keystroke is
+        # how a DLP agent gets switched off -- and a repeat never prompts,
+        # because by definition its window already did.
         do_prompt = False
-        if do_alert:
+        if do_alert and repeat_of is None:
             with self._lock:
                 since_prompt = now - self._last_prompted.get(detected_plat, 0.0)
                 do_prompt    = since_prompt >= _ALERT_COOLDOWN
@@ -610,7 +629,26 @@ class AiBlocker:
             # ChatGPT going through untouched.
             def _report(pol=policy, plat=detected_plat, cleared=do_clear,
                         sample=(content_sample or detected_source)[:100],
-                        risk=risk_score, prompt=do_prompt):
+                        risk=risk_score, prompt=do_prompt, repeat=repeat_of):
+                if repeat:
+                    updated = self._client.repeat_ai_leak_attempt(repeat)
+                    if updated:
+                        logger.info(
+                            f"[AI-MONITOR] Repeat attempt counted  id={repeat}  "
+                            f"attempts={updated.get('attempts')}  platform={plat}"
+                        )
+                        return
+                    # The row is gone (deleted, or a backend that never got
+                    # it). Fall through and open a new one rather than lose
+                    # the attempt entirely -- an uncounted block is worse than
+                    # a duplicate row.
+                    logger.warning(
+                        f"[AI-MONITOR] Could not count repeat onto {repeat} -- "
+                        f"filing a new attempt instead"
+                    )
+                    with self._lock:
+                        self._open_attempt.pop(plat, None)
+
                 attempt = self._client.report_ai_leak_attempt(
                     agent_id=self._agent_id,
                     policy_id=pol.get("id"),
@@ -625,6 +663,10 @@ class AiBlocker:
                         f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
                         f"status={'BLOCKED' if cleared else 'ALERTED'}"
                     )
+                    if attempt.get("id"):
+                        # Repeats for the rest of this window count onto it.
+                        with self._lock:
+                            self._open_attempt[plat] = attempt["id"]
                     if cleared and prompt and attempt.get("id"):
                         self._offer_review_request(attempt["id"], pol, plat)
                 else:
