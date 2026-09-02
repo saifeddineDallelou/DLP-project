@@ -502,24 +502,37 @@ class AiBlocker:
                 f"[AI-MONITOR] !! DATA LEAK {status_word} -- "
                 f"{detected_plat} | {detected_source} | via={source_tag}"
             )
-            attempt = self._client.report_ai_leak_attempt(
-                agent_id=self._agent_id,
-                policy_id=policy.get("id"),
-                platform=detected_plat,
-                method="BROWSER",
-                content_sample=(content_sample or detected_source)[:100],
-                risk_score=risk_score,
-                blocked=do_clear,
-            )
-            if attempt:
-                logger.success(
-                    f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
-                    f"status={'BLOCKED' if do_clear else 'ALERTED'}"
+            # STEP 1 already cleared the clipboard, so this attempt is
+            # enforced no matter what happens here -- but the caller polls,
+            # and blocking it blocks the NEXT detection. An unreachable
+            # backend costs _MAX_RETRIES * timeout + backoff (~10s refused,
+            # ~34s hung), and this is the flagship clipboard path: 34 seconds
+            # of not watching the clipboard is 34 seconds of copy-paste into
+            # ChatGPT going through untouched.
+            def _report(pol=policy, plat=detected_plat, cleared=do_clear,
+                        sample=(content_sample or detected_source)[:100],
+                        risk=risk_score):
+                attempt = self._client.report_ai_leak_attempt(
+                    agent_id=self._agent_id,
+                    policy_id=pol.get("id"),
+                    platform=plat,
+                    method="BROWSER",
+                    content_sample=sample,
+                    risk_score=risk,
+                    blocked=cleared,
                 )
-                if do_clear and attempt.get("id"):
-                    self._offer_review_request(attempt["id"], policy, detected_plat)
-            else:
-                logger.error("[AI-MONITOR] Failed to report incident to backend")
+                if attempt:
+                    logger.success(
+                        f"[AI-MONITOR] Incident REPORTED  id={attempt.get('id')}  "
+                        f"status={'BLOCKED' if cleared else 'ALERTED'}"
+                    )
+                    if cleared and attempt.get("id"):
+                        self._offer_review_request(attempt["id"], pol, plat)
+                else:
+                    logger.error("[AI-MONITOR] Failed to report incident to backend")
+
+            threading.Thread(target=_report, daemon=True,
+                             name="ai-monitor-report").start()
 
         return action
 

@@ -169,10 +169,25 @@ class TestBlockWithReviewRequest:
         return AiBlocker(client, "agent-1"), client
 
     def _capture_thread_target(self):
-        captured = {}
+        """Collect every spawned thread target and run them in order.
+
+        Reporting now happens on its own thread, and the review prompt is
+        offered from INSIDE that thread -- so draining has to keep going as
+        running one target spawns another. Capturing only the last target
+        would silently stop at the report and never reach the prompt."""
+        captured = {"targets": []}
+
         def fake_thread(target, **kwargs):
-            captured["fn"] = target
+            captured["targets"].append(target)
             return MagicMock()
+
+        def run_all():
+            i = 0
+            while i < len(captured["targets"]):
+                captured["targets"][i]()
+                i += 1
+
+        captured["run_all"] = run_all
         return captured, fake_thread
 
     def test_requests_review_with_note_but_never_touches_clipboard(self):
@@ -186,7 +201,7 @@ class TestBlockWithReviewRequest:
              patch("ai_domain_monitor.prompt_review_request", return_value="Looked legitimate to me"):
             result = blocker.check_and_block(t_detect=time.monotonic(), risk_score=0.9)
             assert result == "BLOCK"
-            captured["fn"]()  # run the "background thread" synchronously, patches still active
+            captured["run_all"]()  # run the "background threads" synchronously, patches still active
 
         # The clipboard clear (block message) is the only copy() call --
         # nothing ever restores the original content.
@@ -203,7 +218,7 @@ class TestBlockWithReviewRequest:
              patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread), \
              patch("ai_domain_monitor.prompt_review_request", return_value=""):
             blocker.check_and_block(t_detect=time.monotonic())
-            captured["fn"]()
+            captured["run_all"]()
 
         client.request_review_ai_leak_attempt.assert_called_once_with("attempt-1", None)
 
@@ -216,23 +231,29 @@ class TestBlockWithReviewRequest:
              patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread), \
              patch("ai_domain_monitor.prompt_review_request", return_value=None):
             blocker.check_and_block(t_detect=time.monotonic())
-            captured["fn"]()
+            captured["run_all"]()
 
         client.request_review_ai_leak_attempt.assert_not_called()
 
     def test_no_review_prompt_offered_for_alert_action(self):
-        # ALERT never clears the clipboard, so there's nothing worth
-        # prompting about -- do_clear is False, no thread must spawn.
+        # ALERT never clears the clipboard, so there is nothing worth
+        # prompting about. It IS still reported, with blocked=False -- and
+        # that report runs on its own thread now, so "no thread spawned"
+        # would only be asserting that reporting is synchronous, which is
+        # exactly what it must not be. Assert the actual intent instead.
         blocker, client = self._make_blocker()
         resolver = MagicMock()
         resolver.resolve.return_value = {"id": "p1", "action": "ALERT", "name": "Alert Policy"}
         blocker = AiBlocker(client, "agent-1", policy_resolver=resolver)
+        captured, fake_thread = self._capture_thread_target()
 
-        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "x")), \
-             patch("ai_domain_monitor.threading.Thread") as mock_thread:
+        with patch.object(blocker, "_detect_platform", return_value=("ANTHROPIC_CLAUDE", "x")),              patch("ai_domain_monitor.threading.Thread", side_effect=fake_thread),              patch("ai_domain_monitor.prompt_review_request") as mock_prompt:
             blocker.check_and_block(t_detect=time.monotonic())
+            captured["run_all"]()
 
-        mock_thread.assert_not_called()
+        mock_prompt.assert_not_called()
+        client.request_review_ai_leak_attempt.assert_not_called()
+        assert client.report_ai_leak_attempt.call_args.kwargs["blocked"] is False
 
 
 class TestAiMonitorLoop:

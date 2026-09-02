@@ -47,8 +47,11 @@ The short version of the flow. Each numbered step is a real network hop:
 
 Detection to block is **sub-second**, because the classify round trip and the
 clipboard clear happen in the same event cycle. Reporting to the backend is
-deliberately *after* the block, so a slow or offline backend can never delay
-enforcement.
+deliberately *after* the block, and on a background thread, so a slow or
+offline backend delays neither this enforcement nor the next one. The second
+half of that mattered: while the report ran inline, an unreachable backend
+left the monitor blind for the ten seconds it spent retrying, and a leak
+retried in that window went through.
 
 ---
 
@@ -231,7 +234,7 @@ Configuration lives in `.env` files per component; each has a committed
 
 ```bash
 cd backend    && npm test            # 246
-cd agent      && python -m pytest -q # 333
+cd agent      && python -m pytest -q # 354
 cd classifier && python -m pytest -q # 79
 cd frontend   && npm test            # 30
 ```
