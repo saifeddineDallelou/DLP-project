@@ -133,13 +133,14 @@ admin configuration. JWT auth with three roles (`ADMIN`, `ANALYST`, `VIEWER`).
 | `reports.js` | Daily aggregate reporting |
 | `audit.js` | Read-only audit trail — filter, paginate, per-object history |
 | `siem.js` | SIEM forwarding status and connectivity test |
+| `edm.js` | Authenticated proxy to the classifier's Exact Data Match sets, plus an audit trail of who indexed or removed one |
 
 ```bash
 cd backend
 npm install
 npx prisma migrate deploy && npm run seed
 npm run dev                                    # http://localhost:3001
-npm test                                       # 111 tests, 9 suites
+npm test                                       # 277 tests, 17 suites
 ```
 
 ### `agent/` — Windows endpoint monitor
@@ -221,6 +222,7 @@ React + Vite + Tailwind, `recharts` for visualisation.
 | `Agents.jsx` | Enrolled endpoints |
 | `Reports.jsx` | Daily aggregates |
 | `Audit.jsx` | Audit trail of privileged actions |
+| `ReferenceSets.jsx` | Exact Data Match sets — upload a table of real records, choose how many fields must correlate |
 
 ```bash
 cd frontend
@@ -248,10 +250,10 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 263
+cd backend    && npm test            # 277
 cd agent      && python -m pytest -q # 366
 cd classifier && python -m pytest -q # 96
-cd frontend   && npm test            # 30
+cd frontend   && npm test            # 105
 ```
 
 Run locally before pushing. Note that the agent suite is **Windows-only** — it

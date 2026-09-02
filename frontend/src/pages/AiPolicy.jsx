@@ -8,7 +8,7 @@ import Badge from '../components/Badge.jsx';
 import RiskBar from '../components/RiskBar.jsx';
 import Spinner from '../components/Spinner.jsx';
 import EmptyState from '../components/EmptyState.jsx';
-import { formatDate, PLATFORM_LABELS } from '../utils/format.js';
+import { formatDate, parseDetectionSample, PLATFORM_LABELS } from '../utils/format.js';
 
 const PLATFORMS = Object.keys(PLATFORM_LABELS);
 
@@ -120,9 +120,24 @@ export default function AiPolicy() {
                 <td className="td font-mono text-xs text-ink-faint">{att.agent?.hostname ?? '—'}</td>
                 <td className="td text-xs text-ink-faint truncate max-w-[140px]">{att.policy?.name ?? '—'}</td>
                 <td className="td">
-                  <span className="text-[11px] text-ink-faint font-mono max-w-[180px] block truncate">
-                    {att.contentSample ?? '—'}
-                  </span>
+                  {(() => {
+                    const d = parseDetectionSample(att.contentSample);
+                    return (
+                      <span className="flex items-center gap-1.5 max-w-[200px]">
+                        {d.isEdm && (
+                          <span
+                            title={`Exact Data Match against the '${d.setName}' reference set — this is one of your own records, not content that merely looks sensitive`}
+                            className="badge text-[9px] bg-accent-soft text-accent-text shrink-0"
+                          >
+                            EDM
+                          </span>
+                        )}
+                        <span className="text-[11px] text-ink-faint font-mono truncate">
+                          {att.contentSample ? d.text : '—'}
+                        </span>
+                      </span>
+                    );
+                  })()}
                 </td>
                 <td className="td text-xs text-ink-faint">{formatDate(att.timestamp)}</td>
               </tr>

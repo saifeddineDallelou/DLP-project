@@ -126,3 +126,29 @@ export const PLATFORM_LABELS = {
   COHERE:            'Cohere',
   OTHER_AI:          'Other AI',
 };
+
+/**
+ * Split a content sample into an Exact Data Match label and the rest.
+ *
+ * EDM detections arrive as "edm:<set>:<column|row> ..." -- readable, but
+ * indistinguishable at a glance from a regex hit, which is the opposite of
+ * the point. A regex hit says content LOOKED sensitive; an EDM hit says it
+ * WAS one of the organisation's own records. That difference is the strongest
+ * signal in an incident queue and it was rendered as an undifferentiated
+ * monospace string.
+ *
+ * Returns { isEdm, setName, text }.
+ */
+export function parseDetectionSample(sample) {
+  const text = String(sample ?? '');
+  // Matched anywhere, not only at the start: a drag-drop sample carries
+  // the filename first ("DRAG:cards.csv edm:customers:row ...").
+  const m = text.match(/edm:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)\s*/i);
+  if (!m) return { isEdm: false, setName: null, text };
+  return {
+    isEdm: true,
+    setName: m[1],
+    // Drop the machine-readable prefix; the badge carries that meaning now.
+    text: (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim() || text,
+  };
+}

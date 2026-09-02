@@ -355,10 +355,10 @@ function ComplianceReport() {
       ) : (
         <>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-            <StatCard label="Events" value={data.summary.totalEvents} />
-            <StatCard label="Rules with activity" value={data.summary.rulesWithActivity} />
-            <StatCard label="Rules covered" value={data.summary.rulesCovered} />
-            <StatCard label="Awaiting admin" value={data.summary.awaitingAdmin} />
+            <StatCard icon={ClipboardList} label="Events" value={data.summary.totalEvents} />
+            <StatCard icon={ShieldX} label="Rules with activity" value={data.summary.rulesWithActivity} tone="critical" />
+            <StatCard icon={CheckCircle2} label="Rules covered" value={data.summary.rulesCovered} tone="low" />
+            <StatCard icon={Flag} label="Awaiting admin" value={data.summary.awaitingAdmin} tone="medium" />
           </div>
 
           <div className="overflow-x-auto">

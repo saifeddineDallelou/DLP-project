@@ -15,6 +15,7 @@ const appRulesRoutes  = require('./routes/app-rules');
 const reportsRoutes   = require('./routes/reports');
 const auditRoutes     = require('./routes/audit');
 const siemRoutes      = require('./routes/siem');
+const edmRoutes      = require('./routes/edm');
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.use('/api/app-rules', appRulesRoutes);
 app.use('/api/reports',   reportsRoutes);
 app.use('/api/audit',     auditRoutes);
 app.use('/api/siem',      siemRoutes);
+app.use('/api/edm',       edmRoutes);
 
 // 404
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));

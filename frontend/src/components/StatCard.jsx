@@ -15,9 +15,15 @@ const TONE_CLS = {
 export default function StatCard({ icon: Icon, label, value, sub, tone = 'accent' }) {
   return (
     <div className="card flex items-center gap-4">
-      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${TONE_CLS[tone]}`}>
-        <Icon size={19} />
-      </div>
+      {/* `icon` is optional. Rendering <Icon /> unconditionally meant a
+          caller that omitted it threw "Element type is invalid" and took the
+          entire page down with it -- which is exactly what the Compliance
+          Report tab did. A stat tile is not worth a white screen. */}
+      {Icon && (
+        <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${TONE_CLS[tone] ?? TONE_CLS.accent}`}>
+          <Icon size={19} />
+        </div>
+      )}
       <div className="flex-1 min-w-0">
         <p className="text-xs text-ink-faint font-medium mb-0.5">{label}</p>
         <p className="text-2xl font-bold text-ink tabular-nums leading-tight">{value ?? '—'}</p>
