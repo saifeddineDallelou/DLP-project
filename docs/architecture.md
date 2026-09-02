@@ -110,10 +110,23 @@ without which EDM silently fails on exactly the values it exists for.
 Case, accents, separators and typographic punctuation are all folded before
 hashing, or EDM matches only identically formatted values.
 
-**Scope, stated honestly:** this matches per-value. Purview and Symantec
-correlate several fields from the same *row* before firing, which is what makes
-a common single column safe to index. Row correlation is the honest next step
-and is not implemented.
+*Row correlation.* A set's `min_fields` is how many distinct columns of one
+record must appear before that record counts as matched. 1 is per-value
+matching; 2 or more correlates, which is what makes a common single column
+safe to index — a shared surname is noise, a shared surname beside that
+person's own payroll number is not.
+
+Attribution is per (column, row) rather than per digest. A value can be a
+surname in one record and a place name in another — Lincoln, Preston — and
+crediting one token to every column it appears in, across every row it appears
+in, would report one word as two full-record matches.
+
+**What it costs, stated honestly:** correlation needs the record linkage, so a
+correlated set persists which digests belong to the same row. Values stay
+hashed, but a stolen correlated index reveals that two digests describe the
+same person, which meaningfully escalates a dictionary attack on a low-entropy
+column. The linkage is therefore written only when `min_fields` > 1 — a
+per-value set stores the same unordered bag of digests it always did.
 
 ## 3. Request flow of a single leak attempt
 

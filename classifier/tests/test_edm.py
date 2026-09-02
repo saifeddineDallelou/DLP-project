@@ -251,3 +251,185 @@ class TestEngineIntegration:
 
         save_reference_set(build_reference_set("customers", CUSTOMERS))
         assert classify_text(text, None)["risk_score"] > 0.0
+
+# A set built to be DELIBERATELY dangerous per-value: `city` and `surname` are
+# common enough that indexing them alone guarantees false positives. That is
+# the situation correlation exists to make safe.
+STAFF = [
+    {"surname": "Okafor", "city": "Manchester", "payroll": "PR-99120"},
+    {"surname": "Volkov", "city": "Manchester", "payroll": "PR-44317"},
+    {"surname": "Cherif", "city": "Lyon", "payroll": "PR-70225"},
+]
+
+
+class TestRowCorrelation:
+    def _staff(self, min_fields=2):
+        return build_reference_set(
+            "staff", STAFF, rule="INTERNAL", salt=SALT, min_fields=min_fields
+        )
+
+    def test_one_field_alone_does_not_fire(self):
+        # "Manchester" is in the reference set and belongs to two real
+        # records -- and on its own it means nothing. Per-value matching
+        # would flag this sentence; that is the false positive correlation
+        # is for.
+        hits = match_text("Our Manchester office is hiring.", [self._staff()], salt=SALT)
+        assert hits == []
+
+    def test_two_fields_of_the_same_record_fire(self):
+        hits = match_text(
+            "Okafor, based in Manchester, filed the report.",
+            [self._staff()], salt=SALT,
+        )
+        assert len(hits) == 1
+        assert hits[0]["type"] == "edm:staff:row"
+        assert hits[0]["_count"] == 1
+        assert hits[0]["_fields"] == ["city", "surname"]
+
+    def test_two_fields_from_DIFFERENT_records_do_not_fire(self):
+        # The whole correctness question. "Cherif" is a real surname in the
+        # set and "Manchester" is a real city in the set -- but no single
+        # employee has both. Crediting them to one record would invent a
+        # correlation that does not exist.
+        hits = match_text(
+            "Cherif visited the Manchester branch.", [self._staff()], salt=SALT
+        )
+        assert hits == []
+
+    def test_a_full_record_fires_on_all_three_fields(self):
+        hits = match_text(
+            "Okafor / Manchester / PR-99120", [self._staff(min_fields=2)], salt=SALT
+        )
+        assert len(hits) == 1
+        assert hits[0]["_fields"] == ["city", "payroll", "surname"]
+
+    def test_requiring_three_fields_rejects_a_two_field_leak(self):
+        hits = match_text(
+            "Okafor, Manchester", [self._staff(min_fields=3)], salt=SALT
+        )
+        assert hits == []
+
+    def test_requiring_three_fields_accepts_the_full_record(self):
+        hits = match_text(
+            "Okafor, Manchester, PR-99120", [self._staff(min_fields=3)], salt=SALT
+        )
+        assert len(hits) == 1
+        assert hits[0]["_count"] == 1
+
+    def test_counts_each_matched_record_once(self):
+        # Two different employees fully leaked -- two records, reported as one
+        # detection carrying a count of 2 because they hit the same columns.
+        hits = match_text(
+            "Okafor Manchester PR-99120 and Volkov Manchester PR-44317",
+            [self._staff()], salt=SALT,
+        )
+        assert len(hits) == 1
+        assert hits[0]["_count"] == 2
+
+    def test_never_reports_the_matched_values(self):
+        hits = match_text(
+            "Okafor, Manchester, PR-99120", [self._staff()], salt=SALT
+        )
+        blob = " ".join(str(v) for v in hits[0].values())
+        for secret in ("Okafor", "Manchester", "PR-99120"):
+            assert secret not in blob
+
+    def test_a_record_match_outweighs_a_single_value_match(self):
+        correlated = match_text("Okafor Manchester", [self._staff()], salt=SALT)
+        per_value = match_text(
+            "Okafor", [build_reference_set("staff", STAFF, salt=SALT)], salt=SALT
+        )
+        assert correlated[0]["_weight"] > per_value[0]["_weight"]
+
+    def test_min_fields_one_is_unchanged_per_value_behaviour(self):
+        rs = self._staff(min_fields=1)
+        assert rs.correlated is False
+        assert rs.row_index == {}
+        hits = match_text("Our Manchester office", [rs], salt=SALT)
+        assert len(hits) == 1
+        assert hits[0]["type"] == "edm:staff:city"
+
+    def test_the_row_index_holds_no_raw_values(self):
+        rs = self._staff()
+        blob = repr(rs.row_index)
+        for secret in ("Okafor", "Manchester", "PR-99120"):
+            assert secret not in blob
+
+
+class TestCorrelatedPersistence:
+    def test_round_trips_and_still_correlates(self, store):
+        rs = build_reference_set("staff", STAFF, min_fields=2)
+        save_reference_set(rs)
+        loaded = load_reference_sets()[0]
+        assert loaded.min_fields == 2
+        assert loaded.correlated is True
+        assert loaded.row_count == 3
+        assert loaded.columns.keys() == rs.columns.keys()
+        assert match_text("Okafor, Manchester", [loaded]) != []
+        assert match_text("Cherif, Manchester", [loaded]) == []
+
+    def test_the_stored_file_contains_no_raw_values(self, store):
+        save_reference_set(build_reference_set("staff", STAFF, min_fields=2))
+        blob = (store / "staff.json").read_text(encoding="utf-8")
+        for secret in ("Okafor", "Manchester", "PR-99120"):
+            assert secret not in blob
+
+    def test_a_per_value_set_stores_no_row_linkage(self, store):
+        # Opting out of correlation opts out of recording which values belong
+        # to the same person -- the file is exactly what it always was.
+        import json
+        save_reference_set(build_reference_set("staff", STAFF, min_fields=1))
+        raw = json.loads((store / "staff.json").read_text(encoding="utf-8"))
+        assert "rowIndex" not in raw
+        assert "columns" in raw
+
+    def test_a_legacy_file_without_min_fields_loads_as_per_value(self, store):
+        # Files written before correlation existed must keep working.
+        import json
+        (store / "legacy.json").write_text(json.dumps({
+            "name": "legacy",
+            "rule": "INTERNAL",
+            "maxWords": 2,
+            "columns": {"name": [fingerprint("Sarah Okafor")]},
+        }), encoding="utf-8")
+        loaded = [s for s in load_reference_sets() if s.name == "legacy"][0]
+        assert loaded.min_fields == 1
+        assert loaded.correlated is False
+        assert match_text("Sarah Okafor", [loaded]) != []
+
+class TestRowAttribution:
+    """
+    The subtle correctness point behind _match_rows' docstring.
+
+    Plenty of real values are a surname in one record and a place in another
+    -- Lincoln, Preston, Washington. Indexing digest -> rows and then
+    crediting every column that digest appears in to every one of those rows
+    invents correlations: one token would look like two different fields of
+    two different people at once. Attribution has to be per (column, row).
+    """
+
+    OVERLAP = [
+        {"surname": "Lincoln", "city": "Manchester"},
+        {"surname": "Volkov",  "city": "Lincoln"},
+    ]
+
+    def _set(self):
+        return build_reference_set(
+            "overlap", self.OVERLAP, salt=SALT, min_fields=2
+        )
+
+    def test_one_ambiguous_token_is_not_two_fields_of_one_record(self):
+        # "Lincoln" is row 0's surname AND row 1's city -- one token, two
+        # records, one field each. Neither record reaches two fields, so
+        # nothing fires. A digest-keyed index that ignored which COLUMN the
+        # row matched on would credit both columns to both rows and report
+        # two full-record matches from a single word.
+        assert match_text("Lincoln", [self._set()], salt=SALT) == []
+
+    def test_the_ambiguous_token_still_fires_with_a_genuine_second_field(self):
+        # Same token, but now row 0's own city is present too: that really is
+        # two fields of one record.
+        hits = match_text("Lincoln, Manchester", [self._set()], salt=SALT)
+        assert len(hits) == 1
+        assert hits[0]["_count"] == 1
+        assert hits[0]["_fields"] == ["city", "surname"]
