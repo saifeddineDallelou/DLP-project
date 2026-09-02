@@ -88,8 +88,23 @@ It catches what no pattern can — a customer name, an account reference — and
 stored**; only salted HMAC digests, so uploading a customer list doesn't
 create a second copy of it. Set `EDM_SALT` per deployment.
 
-Scope, stated plainly: this matches per-value. Commercial EDM correlates
-several fields from the same *row* before firing. Not implemented.
+**Row correlation.** A set can require several fields of the *same record*
+before it fires — `"min_fields": 2` means a name alone is nothing, but that
+name beside that customer's own account number is a match:
+
+```bash
+curl -X POST localhost:8000/edm -H 'Content-Type: application/json' -d '{
+  "name": "staff", "rule": "GDPR", "min_fields": 2,
+  "rows": [{"surname": "Okafor", "city": "Manchester", "payroll": "PR-99120"}]
+}'
+```
+
+That is what makes a *common* column safe to index — a shared surname or a
+city is noise on its own. Attribution is per column-and-row, so a value that
+is a surname in one record and a place name in another never counts as two
+fields of one person. The cost is honest: a correlated set stores which
+digests share a record, which a stolen index could exploit, so that linkage is
+written only when `min_fields` > 1.
 
 It holds no other state and knows nothing about policies, users or agents.
 
@@ -97,7 +112,7 @@ It holds no other state and knows nothing about policies, users or agents.
 cd classifier
 pip install -r requirements.txt
 uvicorn src.main:app --reload --port 8000     # http://127.0.0.1:8000/health
-python -m pytest -q                            # 25 tests
+python -m pytest -q                            # 96 tests
 ```
 
 ### `backend/` — control plane
@@ -170,7 +185,7 @@ cd agent
 pip install -r requirements.txt
 cp .env.example .env                           # then edit WATCH_DIRS
 python src/main.py
-python -m pytest -q                            # 275 tests
+python -m pytest -q                            # 354 tests
 ```
 
 **Data-at-rest discovery.** Every monitor above reacts to *activity*. None of
@@ -235,7 +250,7 @@ Configuration lives in `.env` files per component; each has a committed
 ```bash
 cd backend    && npm test            # 246
 cd agent      && python -m pytest -q # 354
-cd classifier && python -m pytest -q # 79
+cd classifier && python -m pytest -q # 96
 cd frontend   && npm test            # 30
 ```
 

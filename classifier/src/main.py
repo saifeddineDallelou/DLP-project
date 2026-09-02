@@ -78,6 +78,10 @@ class EdmUploadRequest(BaseModel):
     name: str
     rows: List[Dict[str, Any]]
     rule: str = "INTERNAL"
+    # How many DISTINCT fields of one record must appear before that record
+    # counts as a match. 1 is per-value matching; 2+ is row correlation, which
+    # is what makes a common column (a surname, a city) safe to index.
+    min_fields: int = 1
 
 
 class EdmSetSummary(BaseModel):
@@ -85,6 +89,19 @@ class EdmSetSummary(BaseModel):
     rule: str
     columns: Dict[str, int]
     totalValues: int
+    minFields: int = 1
+    rowCount: int = 0
+
+
+def _summarise(rs) -> EdmSetSummary:
+    return EdmSetSummary(
+        name=rs.name,
+        rule=rs.rule,
+        columns={col: len(vals) for col, vals in rs.columns.items()},
+        totalValues=rs.total_values,
+        minFields=rs.min_fields,
+        rowCount=rs.row_count,
+    )
 
 
 @app.get("/edm", response_model=List[EdmSetSummary])
@@ -93,15 +110,7 @@ def list_edm_sets() -> List[EdmSetSummary]:
     a digest is not a secret in the way its source value is, but publishing
     one over an API invites an offline dictionary attack against low-entropy
     values, which is the exact risk the salt exists to manage."""
-    return [
-        EdmSetSummary(
-            name=rs.name,
-            rule=rs.rule,
-            columns={col: len(vals) for col, vals in rs.columns.items()},
-            totalValues=rs.total_values,
-        )
-        for rs in load_reference_sets()
-    ]
+    return [_summarise(rs) for rs in load_reference_sets()]
 
 
 @app.post("/edm", response_model=EdmSetSummary, status_code=201)
@@ -123,7 +132,19 @@ def upload_edm_set(req: EdmUploadRequest) -> EdmSetSummary:
     if not req.rows:
         raise HTTPException(status_code=422, detail="rows must not be empty")
 
-    rs = build_reference_set(req.name.strip(), req.rows, rule=req.rule)
+    if req.min_fields < 1:
+        raise HTTPException(status_code=422, detail="min_fields must be at least 1")
+
+    rs = build_reference_set(
+        req.name.strip(), req.rows, rule=req.rule, min_fields=req.min_fields
+    )
+    if req.min_fields > len(rs.columns):
+        raise HTTPException(
+            status_code=422,
+            detail=f"min_fields is {req.min_fields} but the rows have only "
+                   f"{len(rs.columns)} indexable column(s) -- such a set could "
+                   f"never match anything.",
+        )
     if rs.total_values == 0:
         raise HTTPException(
             status_code=422,
@@ -134,13 +155,11 @@ def upload_edm_set(req: EdmUploadRequest) -> EdmSetSummary:
 
     save_reference_set(rs)
     # Deliberately does not echo the submitted rows back.
-    logger.info(f"EDM set '{rs.name}' indexed: {rs.total_values} values")
-    return EdmSetSummary(
-        name=rs.name,
-        rule=rs.rule,
-        columns={col: len(vals) for col, vals in rs.columns.items()},
-        totalValues=rs.total_values,
+    logger.info(
+        f"EDM set '{rs.name}' indexed: {rs.total_values} values, "
+        f"{rs.row_count} rows, min_fields={rs.min_fields}"
     )
+    return _summarise(rs)
 
 
 @app.delete("/edm/{name}", status_code=204)
