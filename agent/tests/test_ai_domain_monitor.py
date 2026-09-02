@@ -8,6 +8,20 @@ import ai_domain_monitor as aidm
 from ai_domain_monitor import AiBlocker, _detect_platform_in_text, _is_browser_window, _ai_monitor_loop
 
 
+@pytest.fixture(autouse=True)
+def _clipboard_holds_sensitive_content():
+    """The blocker now reads the clipboard before writing, so that it never
+    rewrites its own block message (which otherwise turns the delayed path's
+    1s re-checks into a stream of clipboard overwrites).
+
+    Every block test here means "the user just copied something sensitive",
+    so the default is a clipboard that is NOT already cleared. A test about
+    the already-cleared case patches paste itself.
+    """
+    with patch("ai_domain_monitor.pyperclip.paste", return_value="Sarah Okafor, Manchester"):
+        yield
+
+
 class TestDetectPlatformInText:
     @pytest.mark.parametrize("title,expected", [
         ("ChatGPT - Google Chrome", "OPENAI_CHATGPT"),
@@ -131,6 +145,43 @@ class TestAiBlocker:
         )
         for call in mock_copy.call_args_list:
             assert call.args[0] == aidm._DLP_BLOCK_MSG
+
+    def test_an_already_cleared_clipboard_is_not_rewritten(self):
+        """Regression: making the clear unconditional caused a runaway.
+
+        The delayed path (_ai_monitor_loop) re-checks a STALE FLAG once a
+        second for the whole flag window -- it does not look at what is
+        currently on the clipboard. With an unconditional write, a single
+        block became ~30 seconds of overwriting the clipboard once a second,
+        making it unusable for anything else and logging a fresh block each
+        time. Observed live: 31 consecutive clears from one copy.
+
+        The write is now gated on the clipboard's actual contents, which stops
+        the runaway without reintroducing the timer that let re-copies through.
+        """
+        blocker, client = self._make_blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.paste", return_value=aidm._DLP_BLOCK_MSG), \
+             patch("ai_domain_monitor.pyperclip.copy") as mock_copy:
+            for _ in range(10):
+                action = blocker.check_and_block(t_detect=time.monotonic())
+
+        mock_copy.assert_not_called()
+        # Still blocked -- the sensitive content is gone, there was simply
+        # nothing left to overwrite.
+        assert action == "BLOCK"
+
+    def test_freshly_recopied_content_is_still_cleared_every_time(self):
+        # The other half: as soon as real content is back on the clipboard it
+        # is cleared again, with no cooldown gating the action.
+        blocker, client = self._make_blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.paste", return_value="Sarah Okafor, Manchester"), \
+             patch("ai_domain_monitor.pyperclip.copy") as mock_copy:
+            for _ in range(4):
+                blocker.check_and_block(t_detect=time.monotonic())
+
+        assert mock_copy.call_count == 4
 
     def test_an_alert_policy_still_never_clears(self):
         # ALERT is the one case that legitimately does not clear. Making the

@@ -478,10 +478,10 @@ class AiBlocker:
         #
         # There is no situation in which the right answer is to leave a
         # customer record on the clipboard with ChatGPT in the foreground, so
-        # the cooldown no longer gates the action. It now only damps the log
-        # volume, which is all it was ever really needed for: a repeated clear
-        # cannot loop, because clipboard_watcher recognises this exact block
-        # message and skips it without a classify round trip.
+        # the cooldown no longer gates the action -- it only damps log volume.
+        # What prevents a runaway is not a timer but the check below: the
+        # clipboard is only written when it does NOT already hold the block
+        # message.
         do_clear = False
         if action != "ALERT":
             with self._lock:
@@ -489,28 +489,52 @@ class AiBlocker:
                 announce = since_clear >= _CLIP_CLEAR_COOLDOWN
                 self._last_clip_clear[detected_plat] = now
 
-            do_clear = True
+            # Gate the WRITE on what is actually on the clipboard, not on a
+            # timer. The delayed path (_ai_monitor_loop) re-checks a STALE
+            # FLAG once a second for the whole flag window rather than the
+            # clipboard's current contents, so an unconditional write turned
+            # one block into ~30 seconds of overwriting the clipboard every
+            # second -- unusable for anything else, and logged as a fresh
+            # block each time. Checking what is there keeps enforcement
+            # immediate (anything sensitive is cleared at once, every time)
+            # while an already-clear clipboard costs one read and nothing more.
             try:
-                pyperclip.copy(_DLP_BLOCK_MSG)
-                block_ms = (time.monotonic() - t_detect) * 1000
-                if announce:
-                    logger.success(
-                        f"[SPEED] Detection-to-block ({source_tag}): {block_ms:.0f} ms | "
-                        f"platform={detected_plat}"
-                    )
-                    logger.success(
-                        f"[AI-MONITOR] *** CLIPBOARD CLEARED ***  "
-                        f"platform={detected_plat}  Paste is now BLOCKED"
-                    )
-                else:
-                    # Still a real block -- only the shouting is throttled.
-                    logger.info(
-                        f"[AI-MONITOR] Clipboard cleared again ({block_ms:.0f} ms) "
-                        f"| platform={detected_plat}"
-                    )
-            except Exception as exc:
-                do_clear = False
-                logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
+                on_clipboard = pyperclip.paste()
+            except Exception:
+                on_clipboard = ""
+
+            if on_clipboard.startswith(_DLP_BLOCK_MSG[:20]):
+                # The sensitive content is already gone. Still blocked --
+                # there is simply nothing left to overwrite.
+                do_clear = True
+                logger.debug(
+                    f"[AI-MONITOR] Clipboard already cleared, nothing to "
+                    f"overwrite | platform={detected_plat}"
+                )
+            else:
+                do_clear = True
+                try:
+                    pyperclip.copy(_DLP_BLOCK_MSG)
+                    block_ms = (time.monotonic() - t_detect) * 1000
+                    if announce:
+                        logger.success(
+                            f"[SPEED] Detection-to-block ({source_tag}): {block_ms:.0f} ms | "
+                            f"platform={detected_plat}"
+                        )
+                        logger.success(
+                            f"[AI-MONITOR] *** CLIPBOARD CLEARED ***  "
+                            f"platform={detected_plat}  Paste is now BLOCKED"
+                        )
+                    else:
+                        # A genuine re-clear of freshly re-copied content --
+                        # only the shouting is throttled, never the action.
+                        logger.info(
+                            f"[AI-MONITOR] Clipboard cleared again ({block_ms:.0f} ms) "
+                            f"| platform={detected_plat}"
+                        )
+                except Exception as exc:
+                    do_clear = False
+                    logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
 
         # ── STEP 2: report to backend (60 s per-platform cooldown) ────────────
         with self._lock:
