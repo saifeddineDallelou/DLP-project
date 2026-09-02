@@ -91,6 +91,13 @@ class EdmSetSummary(BaseModel):
     totalValues: int
     minFields: int = 1
     rowCount: int = 0
+    # Upload-time feedback only -- absent when listing stored sets, because it
+    # describes what happened to a submission rather than the set itself.
+    # A column whose every value was too short indexes NOTHING and would
+    # otherwise just be missing from `columns` with no explanation, leaving
+    # the uploader to believe a field is protected when it was never indexed.
+    skippedColumns: List[str] = []
+    skippedValues: int = 0
 
 
 def _summarise(rs) -> EdmSetSummary:
@@ -101,6 +108,8 @@ def _summarise(rs) -> EdmSetSummary:
         totalValues=rs.total_values,
         minFields=rs.min_fields,
         rowCount=rs.row_count,
+        skippedColumns=list(getattr(rs, "skipped_columns", []) or []),
+        skippedValues=int(getattr(rs, "skipped_values", 0) or 0),
     )
 
 

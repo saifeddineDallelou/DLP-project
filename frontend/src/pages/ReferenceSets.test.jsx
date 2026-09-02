@@ -126,6 +126,44 @@ describe('ReferenceSets page', () => {
     expect(api.get).toHaveBeenCalledTimes(2);
   });
 
+  test('warns when a column indexed nothing', async () => {
+    // The silent version of this is how someone ends up believing a field is
+    // protected when every one of its values was too short to index.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    api.post.mockResolvedValue({
+      data: set({ name: 'staff', columns: { name: 2 }, skippedColumns: ['dept', 'ref'], skippedValues: 4 }),
+    });
+    render(<ReferenceSets />);
+
+    await user.click(await screen.findByRole('button', { name: /index first set/i }));
+    await user.type(screen.getByLabelText(/set name/i), 'staff');
+    await user.type(screen.getByLabelText(/records/i), 'name,ref\nSarah Okafor,CR-1');
+    await user.click(screen.getByRole('button', { name: /^index set$/i }));
+
+    expect(await screen.findByText(/matched nothing/i)).toBeInTheDocument();
+    expect(screen.getByText('dept')).toBeInTheDocument();
+    expect(screen.getByText('ref')).toBeInTheDocument();
+    // The "not protected" sentence is deliberately split across elements to
+    // emphasise the word "not", so match on the rendered text as a whole.
+    expect(document.body.textContent).toMatch(/not\s*protected by this set/i);
+  });
+
+  test('no warning when every column indexed', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    api.post.mockResolvedValue({ data: set({ skippedColumns: [], skippedValues: 0 }) });
+    render(<ReferenceSets />);
+
+    await user.click(await screen.findByRole('button', { name: /index first set/i }));
+    await user.type(screen.getByLabelText(/set name/i), 'customers');
+    await user.type(screen.getByLabelText(/records/i), 'name,city\nSarah Okafor,Manchester');
+    await user.click(screen.getByRole('button', { name: /^index set$/i }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(screen.queryByText(/matched nothing/i)).not.toBeInTheDocument();
+  });
+
   test('a malformed CSV is reported without calling the API', async () => {
     const user = userEvent.setup();
     api.get.mockResolvedValue({ data: [] });

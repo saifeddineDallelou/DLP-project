@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Plus, Trash2, Database, RefreshCw, ShieldCheck, Layers } from 'lucide-react';
+import { Plus, Trash2, Database, RefreshCw, ShieldCheck, Layers, AlertTriangle } from 'lucide-react';
 import api from '../services/api.js';
 import Modal from '../components/Modal.jsx';
 import PageHeader from '../components/PageHeader.jsx';
@@ -126,6 +126,7 @@ export default function ReferenceSets() {
   const [formError, setFormError] = useState('');
   const [saving, setSaving]     = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [skipped, setSkipped]   = useState(null);
 
   const fetchSets = useCallback(async () => {
     setLoading(true);
@@ -168,12 +169,20 @@ export default function ReferenceSets() {
 
     setSaving(true);
     try {
-      await api.post('/api/edm', {
+      const { data } = await api.post('/api/edm', {
         name: form.name.trim(),
         rule: form.rule,
         min_fields: Number(form.minFields) || 1,
         rows,
       });
+      // A column whose every value was too short indexes NOTHING and would
+      // otherwise just be absent from the result, leaving the uploader to
+      // believe a field is protected when it never was.
+      setSkipped(
+        data?.skippedColumns?.length
+          ? { name: data.name, columns: data.skippedColumns }
+          : null,
+      );
       setCreating(false);
       setForm(EMPTY_FORM);      // drop the pasted records from component state
       await fetchSets();
@@ -214,6 +223,26 @@ export default function ReferenceSets() {
 
       {loadError && (
         <div className="card mb-4 text-xs text-severity-critical-text">{loadError}</div>
+      )}
+
+      {skipped && (
+        <div className="card mb-4 flex items-start gap-2">
+          <AlertTriangle size={13} className="text-severity-medium-text shrink-0 mt-0.5" />
+          <div className="text-xs text-ink-soft">
+            <p className="mb-0.5">
+              <span className="text-ink font-medium">{skipped.name}</span> indexed, but{' '}
+              {skipped.columns.map((c) => <span key={c} className="font-mono">{c} </span>)}
+              matched nothing — every value was under 4 characters once case, accents and
+              separators were folded.
+            </p>
+            <p className="text-ink-faint">
+              Those fields are <span className="text-ink">not</span> protected by this set.
+              Short codes like <span className="font-mono">CR-1</span> normalise to three
+              characters and would fire on ordinary prose, so they are deliberately not indexed.
+            </p>
+          </div>
+          <button onClick={() => setSkipped(null)} className="btn-icon ml-auto shrink-0">×</button>
+        </div>
       )}
 
       {loading ? (

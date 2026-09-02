@@ -112,7 +112,7 @@ It holds no other state and knows nothing about policies, users or agents.
 cd classifier
 pip install -r requirements.txt
 uvicorn src.main:app --reload --port 8000     # http://127.0.0.1:8000/health
-python -m pytest -q                            # 96 tests
+python -m pytest -q                            # 106 tests
 ```
 
 ### `backend/` — control plane
@@ -252,8 +252,8 @@ Configuration lives in `.env` files per component; each has a committed
 ```bash
 cd backend    && npm test            # 277
 cd agent      && python -m pytest -q # 366
-cd classifier && python -m pytest -q # 96
-cd frontend   && npm test            # 105
+cd classifier && python -m pytest -q # 106
+cd frontend   && npm test            # 107
 ```
 
 Run locally before pushing. Note that the agent suite is **Windows-only** — it

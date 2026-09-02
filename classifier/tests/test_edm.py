@@ -433,3 +433,114 @@ class TestRowAttribution:
         assert len(hits) == 1
         assert hits[0]["_count"] == 1
         assert hits[0]["_fields"] == ["city", "surname"]
+
+
+class TestSaltConfiguration:
+    """
+    The salt is the whole security property of this module. The default is a
+    literal in edm.py and therefore public: an index salted with it is
+    dictionary-attackable by anyone who can read the repository. Falling back
+    to it SILENTLY made a misconfigured deployment indistinguishable from a
+    correct one until the index was stolen.
+    """
+
+    def test_uses_the_configured_salt(self, monkeypatch):
+        import src.edm as edm
+        monkeypatch.setenv("EDM_SALT", "a-real-deployment-secret")
+        assert edm._salt() == b"a-real-deployment-secret"
+
+    def test_falls_back_when_unset(self, monkeypatch):
+        import src.edm as edm
+        monkeypatch.delenv("EDM_SALT", raising=False)
+        monkeypatch.setattr(edm, "_warned_default_salt", False)
+        assert edm._salt() == edm._DEFAULT_SALT.encode("utf-8")
+
+    def test_warns_loudly_the_first_time_it_falls_back(self, monkeypatch, capsys):
+        import src.edm as edm
+        from loguru import logger as _logger
+        monkeypatch.delenv("EDM_SALT", raising=False)
+        monkeypatch.setattr(edm, "_warned_default_salt", False)
+
+        seen = []
+        sink = _logger.add(lambda m: seen.append(m), level="CRITICAL")
+        try:
+            edm._salt()
+        finally:
+            _logger.remove(sink)
+
+        assert len(seen) == 1
+        assert "EDM_SALT" in seen[0]
+
+    def test_does_not_warn_on_every_call(self, monkeypatch):
+        # A scan hashes thousands of candidates; one warning, not thousands.
+        import src.edm as edm
+        from loguru import logger as _logger
+        monkeypatch.delenv("EDM_SALT", raising=False)
+        monkeypatch.setattr(edm, "_warned_default_salt", False)
+
+        seen = []
+        sink = _logger.add(lambda m: seen.append(m), level="CRITICAL")
+        try:
+            for _ in range(50):
+                edm._salt()
+        finally:
+            _logger.remove(sink)
+
+        assert len(seen) == 1
+
+    def test_a_different_salt_produces_a_different_index(self, monkeypatch):
+        # Restating the point the warning exists to protect: the salt is what
+        # makes a stolen index useless without also stealing the key.
+        import src.edm as edm
+        monkeypatch.setenv("EDM_SALT", "deployment-a")
+        a = edm.build_reference_set("s", [{"name": "Sarah Okafor"}])
+        monkeypatch.setenv("EDM_SALT", "deployment-b")
+        b = edm.build_reference_set("s", [{"name": "Sarah Okafor"}])
+        assert a.digests() != b.digests()
+
+
+class TestSkippedColumnsAreReported:
+    """
+    A column whose every value is too short indexes NOTHING, and used to do so
+    silently. The uploader saw a set with fewer columns than they submitted
+    and no explanation -- which is how someone ends up believing a field is
+    protected when it was never indexed at all.
+    """
+
+    def test_names_a_column_that_indexed_nothing(self):
+        # "CR-1" normalises to "cr1" (3 chars) and "IT" to "it" (2) -- both
+        # under _MIN_VALUE_LEN, so neither column indexes anything.
+        rs = build_reference_set(
+            "t", [{"name": "Sarah Okafor", "ref": "CR-1", "dept": "IT"}], salt=SALT
+        )
+        assert list(rs.columns) == ["name"]
+        assert rs.skipped_columns == ["dept", "ref"]
+
+    def test_counts_the_values_it_skipped(self):
+        rs = build_reference_set(
+            "t", [{"a": "ok-enough", "b": "xy"}, {"a": "also-fine", "b": "zw"}], salt=SALT
+        )
+        assert rs.skipped_values == 2
+        assert rs.skipped_columns == ["b"]
+
+    def test_a_column_that_indexed_anything_is_not_reported(self):
+        # Partially-short is not the same as useless: one good value means the
+        # column IS protecting something, and warning about it would be noise.
+        rs = build_reference_set(
+            "t", [{"a": "xy"}, {"a": "long-enough"}], salt=SALT
+        )
+        assert rs.skipped_columns == []
+        assert rs.skipped_values == 1
+
+    def test_a_fully_indexed_set_reports_nothing_skipped(self):
+        rs = build_reference_set("t", [{"name": "Sarah Okafor"}], salt=SALT)
+        assert rs.skipped_columns == []
+        assert rs.skipped_values == 0
+
+    def test_the_flags_do_not_survive_a_round_trip(self, store):
+        # They describe an upload, not the set, so a stored set carries none.
+        rs = build_reference_set("t", [{"name": "Sarah Okafor", "ref": "CR-1"}])
+        assert rs.skipped_columns == ["ref"]
+        save_reference_set(rs)
+        loaded = load_reference_sets()[0]
+        assert loaded.skipped_columns == []

@@ -94,8 +94,39 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+\-']{2,}")
 _DIGIT_RUN_RE = re.compile(r"\d[\d\s\-]{3,}\d")
 
 
+# Set once the fallback has been reported, so a per-call warning does not
+# drown the log on a scan that hashes thousands of candidates.
+_warned_default_salt = False
+
+
 def _salt() -> bytes:
-    return os.environ.get(_SALT_ENV, _DEFAULT_SALT).encode("utf-8")
+    """The per-deployment secret, or a loud fallback.
+
+    The default is a literal in this file, which means it is in the public
+    repository: an index salted with it is salted with a value the attacker
+    already has, and every low-entropy digest -- a surname, a six-digit
+    account number -- falls to a dictionary attack in seconds. That is the
+    entire property EDM depends on.
+
+    Falling back silently was the problem. A deployment that never set
+    EDM_SALT looked identical to one that did, right up until the index was
+    stolen. It now says so, once, at CRITICAL.
+    """
+    global _warned_default_salt
+    configured = os.environ.get(_SALT_ENV)
+    if configured:
+        return configured.encode("utf-8")
+
+    if not _warned_default_salt:
+        _warned_default_salt = True
+        logger.critical(
+            f"[EDM] {_SALT_ENV} is not set -- falling back to the built-in "
+            f"development salt, which is a literal in this file and therefore "
+            f"public. Digests built with it are dictionary-attackable by "
+            f"anyone who can read the source. Set {_SALT_ENV} before indexing "
+            f"real records."
+        )
+    return _DEFAULT_SALT.encode("utf-8")
 
 
 # Word processors substitute these for the ASCII characters a database holds.
@@ -175,6 +206,14 @@ class ReferenceSet:
     max_words: int = 1
     # column -> digest -> row numbers. Empty when min_fields <= 1.
     row_index: dict[str, dict[str, set[int]]] = field(default_factory=dict)
+    # Build-time feedback, NOT persisted -- it describes the upload, not the
+    # set. Columns whose every value was too short to index vanish silently
+    # otherwise: an account reference like "CR-1" normalises to "cr1", three
+    # characters, under _MIN_VALUE_LEN. The uploader sees a set with fewer
+    # columns than they submitted and no explanation, which is how someone
+    # ends up believing a field is protected when it was never indexed.
+    skipped_columns: list[str] = field(default_factory=list)
+    skipped_values: int = 0
     # Distinct columns of one row required before that row is a match.
     min_fields: int = 1
     row_count: int = 0
@@ -220,6 +259,9 @@ def build_reference_set(
     skipped = 0
     max_words = 1
     row_count = 0
+    # Every column name seen, so one whose values were ALL too short can be
+    # named rather than merely missing from the result.
+    seen_columns: set[str] = set()
 
     for row in rows or []:
         if not isinstance(row, dict):
@@ -229,6 +271,7 @@ def build_reference_set(
         for column, value in row.items():
             if value is None:
                 continue
+            seen_columns.add(str(column))
             norm = normalise(value)
             if len(norm) < min_len:
                 # Too short to be distinctive -- indexing it would fire on
@@ -250,6 +293,8 @@ def build_reference_set(
         row_index=row_index,
         min_fields=min_fields,
         row_count=row_count,
+        skipped_columns=sorted(seen_columns - set(columns)),
+        skipped_values=skipped,
     )
     logger.info(
         f"[EDM] Built '{name}': {rs.total_values} values across "
@@ -258,6 +303,11 @@ def build_reference_set(
         + (f" | correlated: {min_fields} field(s) of one row required"
            if min_fields > 1 else "")
     )
+    if rs.skipped_columns:
+        logger.warning(
+            f"[EDM] '{name}' -- column(s) {rs.skipped_columns} indexed NOTHING: "
+            f"every value was under {min_len} characters after normalisation"
+        )
     if min_fields > len(columns) and columns:
         # Nothing can ever satisfy this -- say so at build time rather than
         # letting the set sit there silently matching nothing forever.
