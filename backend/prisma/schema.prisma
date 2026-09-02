@@ -141,6 +141,18 @@ model UserBehaviorBaseline {
   avgWorkingHourStart  Int      @map("avg_working_hour_start")
   avgWorkingHourEnd    Int      @map("avg_working_hour_end")
   avgUsbFrequency      Float    @map("avg_usb_frequency")
+  // How many DISTINCT DAYS of activity this baseline was computed from.
+  //
+  // Without it, a baseline built from three events in one lunchtime is
+  // presented with exactly the confidence of one built from three weeks of
+  // work, and the scorer trusts it identically. That is not a hypothetical:
+  // a freshly deployed agent produces a window like "12-12h" -- this person
+  // works one hour a day -- against which every ordinary morning reads as
+  // after-hours, and an entire rollout flags on day two.
+  //
+  // 0 is the honest value for a baseline written before this field existed:
+  // we do not know what it rests on, so it is not yet trusted for scoring.
+  activeDaysObserved   Int      @default(0) @map("active_days_observed")
   riskScore            Float    @default(0) @map("risk_score")
   lastUpdated          DateTime @map("last_updated")
 

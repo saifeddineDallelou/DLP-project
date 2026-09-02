@@ -8,6 +8,9 @@ const {
   combine,
   priorityBoost,
   riskLevel,
+  baselineIsMature,
+  MIN_ACTIVE_DAYS,
+  LEARNING_LEVEL,
   ZERO_BASELINE_FLOORS,
 } = require('../lib/ueba-scoring');
 const { recomputeBaseline } = require('../lib/baseline');
@@ -297,8 +300,15 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       usb: median(peers.map((p) => p.avgUsbFrequency)),
     } : null;
 
+    // Deviations are scored only against a baseline built on enough observed
+    // days. Below the threshold the components are left empty rather than
+    // computed and ignored: a half-formed baseline produces confident-looking
+    // numbers ("86% of activity outside working hours") that describe the
+    // sample size, not the person.
+    const mature = baselineIsMature(baseline);
+
     const components = {};
-    if (baseline) {
+    if (baseline && mature) {
       const vol = deviationSignal(todayVolumeMB, baseline.avgDailyVolumeMB, ZERO_BASELINE_FLOORS.volumeMB);
       const fil = deviationSignal(todayFiles, baseline.avgDailyFiles, ZERO_BASELINE_FLOORS.files);
       const usb = deviationSignal(usbInserts, baseline.avgUsbFrequency, ZERO_BASELINE_FLOORS.usb);
@@ -399,9 +409,12 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
 
     const priority = priorityBoost(findings);
 
-    // With no baseline there is nothing to deviate FROM, so the score falls
-    // back to the bonuses alone rather than reporting a confident zero.
-    const liveScore = baseline
+    // With no usable baseline there is nothing to deviate FROM, so the score
+    // falls back to the bonuses alone rather than reporting a confident zero.
+    // Those bonuses are ABSOLUTE signals -- a large transfer, a PCI-DSS block
+    // -- and stay meaningful during learning precisely because they need no
+    // baseline. What is withheld is the deviation judgement, not the facts.
+    const liveScore = (baseline && mature)
       ? Math.min(1, deviationScore + eventBonus + priority.boost)
       : Math.min(1, eventBonus + priority.boost);
 
@@ -410,7 +423,14 @@ router.get('/risk-score/:userId', authenticate, async (req, res, next) => {
       department: baseline?.department ?? null,
       baselineRiskScore: baseline?.riskScore ?? 0,
       liveRiskScore: parseFloat(liveScore.toFixed(3)),
-      riskLevel: riskLevel(liveScore),
+      riskLevel: (baseline && mature) ? riskLevel(liveScore) : LEARNING_LEVEL,
+      // Everything the dashboard needs to say "learning, 4 of 7 days" rather
+      // than showing a band it has not earned.
+      learning: (baseline && mature) ? null : {
+        activeDaysObserved: baseline?.activeDaysObserved ?? 0,
+        activeDaysRequired: MIN_ACTIVE_DAYS,
+        hasBaseline: Boolean(baseline),
+      },
       // The breakdown is the point: an analyst has to be able to see WHICH
       // metric drove the score, not just that it was high.
       deviationScore: parseFloat(deviationScore.toFixed(3)),

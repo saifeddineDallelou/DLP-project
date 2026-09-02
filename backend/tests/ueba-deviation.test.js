@@ -20,6 +20,7 @@ async function baselineFor(userId, overrides = {}) {
       avgWorkingHourStart: 9,
       avgWorkingHourEnd: 17,
       avgUsbFrequency: 0,
+      activeDaysObserved: 30,
       riskScore: 0,
       lastUpdated: new Date(),
       ...overrides,

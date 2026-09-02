@@ -52,6 +52,37 @@ const ZERO_BASELINE_MAX_SIGNAL = 0.6;
 // abnormal at once -- see the reasoning in combine().
 const DOMINANT_SIGNAL_FACTOR = 0.75;
 
+// How many distinct days of observed activity a baseline needs before its
+// deviations are scored at all.
+//
+// Deviation scoring answers "how far is today from normal for this person",
+// which is meaningless until "normal" rests on something. A baseline built
+// from one afternoon says the user works 12:00-12:00 and touches one file a
+// day; every ordinary morning after that reads as after-hours at 86% signal,
+// and DOMINANT_SIGNAL_FACTOR lets that single metric clear HIGH on its own.
+//
+// The failure this prevents is not subtle. Roll the agent out to 500
+// workstations on a Monday and, without this gate, all 500 flag HIGH on
+// Tuesday -- because on Monday the system had never seen anyone work. A DLP
+// tool that cries wolf in its first week does not get a second one.
+//
+// Seven is a working week: long enough to cover a weekly rhythm and both ends
+// of a working day, short enough that a new starter is scored inside their
+// first fortnight. Commercial UEBA uses 7-30 days for the same reason. Like
+// FULL_SIGNAL_RATIO, this is the number an operator would realistically tune.
+const MIN_ACTIVE_DAYS = 7;
+
+/**
+ * Is this baseline built on enough observation to score deviations from?
+ *
+ * A baseline written before activeDaysObserved existed reports 0, which reads
+ * as "unknown, therefore not yet trusted" -- the safe direction. The hourly
+ * refresh job repopulates it on its next pass.
+ */
+function baselineIsMature(baseline, minDays = MIN_ACTIVE_DAYS) {
+  return Number(baseline?.activeDaysObserved ?? 0) >= minDays;
+}
+
 const WEIGHTS = {
   volume: 0.35,   // volume moved is the signal exfiltration shows up in first
   files:  0.25,
@@ -211,8 +242,18 @@ function riskLevel(score) {
   return score >= 0.7 ? 'HIGH' : score >= 0.4 ? 'MEDIUM' : 'LOW';
 }
 
+// A user still inside the learning period gets this instead of a band.
+// Deliberately NOT 'LOW': "we have not observed this person enough to say" and
+// "this person is behaving normally" are different claims, and collapsing them
+// tells an admin 500 new employees are safe when the truth is nobody has
+// watched them yet -- which is precisely the window a new insider would use.
+const LEARNING_LEVEL = 'LEARNING';
+
 module.exports = {
   FULL_SIGNAL_RATIO,
+  MIN_ACTIVE_DAYS,
+  LEARNING_LEVEL,
+  baselineIsMature,
   DOMINANT_SIGNAL_FACTOR,
   ZERO_BASELINE_FLOORS,
   ZERO_BASELINE_MAX_SIGNAL,
