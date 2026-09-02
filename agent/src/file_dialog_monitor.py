@@ -467,19 +467,29 @@ def _dialog_monitor_loop(
                     # from disk entirely.
                     quarantine_file(path)
 
-                attempt = client.report_ai_leak_attempt(
-                    agent_id=agent_id,
-                    policy_id=policy.get("id"),
-                    platform=platform,
-                    method="BROWSER",
-                    content_sample=f"FILE:{filename}"[:100],
-                    risk_score=risk_score,
-                    blocked=blocked,
-                )
-                if attempt:
-                    logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
-                else:
-                    logger.error("[FILE-DIALOG] Failed to record leak attempt -- backend may be down")
+                # Off the poll loop -- the dialog is already closed, the
+                # report is bookkeeping. Inline, an unreachable backend
+                # freezes this loop for ~10s (refused) to ~34s (hung), and a
+                # second file picked in that window is never seen. Same defect
+                # as drag_drop_monitor had; fixed in the same commit.
+                def _report(pol=policy, plat=platform, fn=filename,
+                            risk=risk_score, b=blocked):
+                    attempt = client.report_ai_leak_attempt(
+                        agent_id=agent_id,
+                        policy_id=pol.get("id"),
+                        platform=plat,
+                        method="BROWSER",
+                        content_sample=f"FILE:{fn}"[:100],
+                        risk_score=risk,
+                        blocked=b,
+                    )
+                    if attempt:
+                        logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
+                    else:
+                        logger.error("[FILE-DIALOG] Failed to record leak attempt -- backend may be down")
+
+                threading.Thread(target=_report, daemon=True,
+                                 name="file-dialog-report").start()
 
             # Only now, once something was actually resolved and classified.
             # If nothing was, this filename is deliberately left unseen so the

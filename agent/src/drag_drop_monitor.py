@@ -353,19 +353,31 @@ def _drag_loop(
             # to drag again a moment later.
             quarantine_file(verdict["path"])
 
-        attempt = client.report_ai_leak_attempt(
-            agent_id=agent_id,
-            policy_id=policy.get("id"),
-            platform=platform,
-            method="BROWSER",
-            content_sample=safe_sample(detections, prefix=f"DRAG:{filename}"),
-            risk_score=verdict["risk_score"],
-            blocked=blocked,
-        )
-        if attempt:
-            logger.success(f"[DRAG-DROP] Leak attempt recorded: id={attempt.get('id')}")
-        else:
-            logger.error("[DRAG-DROP] Failed to record leak attempt")
+        # Report on a background thread -- NEVER on the poll loop. The block
+        # has already happened by this point; the report is bookkeeping. Left
+        # inline it costs _MAX_RETRIES * timeout + backoff whenever the backend
+        # is unreachable -- ~10s refused, ~34s hung -- and the loop sees NOTHING
+        # for that whole time. The person who was just blocked is the most
+        # likely person alive to immediately drag the same file again, so that
+        # retry lands squarely in the blind window and succeeds. Found by
+        # dragging a real file, not by reading the code: the unit tests mock the
+        # client, so a slow client costs them nothing.
+        def _report(v=verdict, p=policy, plat=platform, b=blocked, f=filename):
+            attempt = client.report_ai_leak_attempt(
+                agent_id=agent_id,
+                policy_id=p.get("id"),
+                platform=plat,
+                method="BROWSER",
+                content_sample=safe_sample(v["detections"], prefix=f"DRAG:{f}"),
+                risk_score=v["risk_score"],
+                blocked=b,
+            )
+            if attempt:
+                logger.success(f"[DRAG-DROP] Leak attempt recorded: id={attempt.get('id')}")
+            else:
+                logger.error("[DRAG-DROP] Failed to record leak attempt")
+
+        threading.Thread(target=_report, daemon=True, name="drag-report").start()
 
         state.handled = True
         stop.wait(_POLL_INTERVAL)

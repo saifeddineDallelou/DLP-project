@@ -81,7 +81,8 @@ class TestDragLoop:
     EXPLORER_HWND = 100
     BROWSER_HWND = 200
 
-    def _run(self, *, script, selection, classify_result, policy_action="BLOCK"):
+    def _run(self, *, script, selection, classify_result, policy_action="BLOCK",
+             report_side_effect=None, join_threads=True):
         """
         `script` is one (pressed, hwnd) pair per poll, so a whole gesture can
         be written out: press over Explorer, hold while the cursor crosses to
@@ -103,7 +104,10 @@ class TestDragLoop:
 
         client = MagicMock()
         client.classify.return_value = classify_result
-        client.report_ai_leak_attempt.return_value = {"id": "leak-1"}
+        if report_side_effect is not None:
+            client.report_ai_leak_attempt.side_effect = report_side_effect
+        else:
+            client.report_ai_leak_attempt.return_value = {"id": "leak-1"}
 
         resolver = MagicMock()
         resolver.resolve.return_value = {"id": "p1", "action": policy_action, "name": "PCI-DSS"}
@@ -127,6 +131,14 @@ class TestDragLoop:
             u32.GetAsyncKeyState.side_effect = fake_key_state
             ddm._drag_loop(client, "agent-1", stop, resolver,
                            ai_platform_for=lambda t: "OPENAI_CHATGPT" if "ChatGPT" in t else None)
+
+            # Classify and report both run off the loop now. Join them here so
+            # assertions about them are deterministic instead of a race with a
+            # daemon thread that may or may not have been scheduled yet.
+            if join_threads:
+                for t in threading.enumerate():
+                    if t.name in ("drag-classify", "drag-report"):
+                        t.join(timeout=5)
 
         return esc, quar, client
 
@@ -221,6 +233,49 @@ class TestDragLoop:
         )
         assert esc.call_count == 1
         assert client.report_ai_leak_attempt.call_count == 1
+
+    def test_an_unreachable_backend_does_not_stall_the_poll_loop(self):
+        """Regression: the report used to run INLINE in the poll loop.
+
+        api_client retries 3 times with a 10s timeout and a 2s backoff, so an
+        unreachable backend cost the loop ~10s (connection refused) to ~34s
+        (hung), during which it polled nothing and saw nothing. Live testing
+        found it the obvious way -- get blocked once, immediately drag the
+        same file again, and the retry sails through because the monitor is
+        not watching. The person who was just blocked is exactly the person
+        who retries.
+
+        The mocked client in every other test returns instantly, which is why
+        a full green suite never caught this.
+
+        Proven by parking the report: the loop must return while the report is
+        still in flight. Inline, it could not have.
+        """
+        entered, release, completed = (threading.Event() for _ in range(3))
+
+        def parked_report(**kwargs):
+            entered.set()
+            release.wait(10)
+            completed.set()
+            return {"id": "leak-1"}
+
+        try:
+            esc, _quar, _client = self._run(
+                script=self._drag_to_browser(),
+                selection=[r"C:\Users\x\cards.txt"],
+                classify_result=SENSITIVE,
+                report_side_effect=parked_report,
+                join_threads=False,
+            )
+            assert entered.wait(5), "the report never ran at all"
+            # The block is what protects the user, and it still happened.
+            esc.assert_called_once()
+            # And the loop got back to polling without waiting for the backend.
+            assert not completed.is_set(), (
+                "the poll loop waited for the backend -- it is blind that long"
+            )
+        finally:
+            release.set()
 
     def test_a_drag_starting_outside_explorer_is_ignored(self):
         # A drag from another app's custom drag source exposes no readable
