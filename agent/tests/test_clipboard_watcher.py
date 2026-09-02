@@ -1,5 +1,7 @@
+import threading
 from unittest.mock import patch, MagicMock
 
+import clipboard_watcher as cw
 from clipboard_watcher import _scan_copied_files, _check_restricted_app
 from evidence import safe_sample
 
@@ -403,3 +405,95 @@ class TestScanCopiedFiles:
         _scan_copied_files((str(f),), client, "agent-1", state, blocker)
 
         blocker.check_and_block.assert_not_called()
+
+class TestRecopyAfterABlock:
+    """
+    Regression: a re-copy immediately after a block used to be invisible.
+
+    `prev` was set to the sensitive text, then the blocker overwrote the
+    clipboard -- but `prev` was never updated to reflect that. So if the user
+    copied the same text again before the next poll (which is exactly what
+    someone does when a paste comes out as the block message), the
+    `current == prev` check at the top of the loop read it as "nothing
+    changed" and skipped it: not classified, not blocked, not logged. The
+    data sat in the clipboard, pasteable, and `prev` stayed stuck on it so it
+    never fired for that content again.
+
+    Found by live-testing: blocked once, copied again, pasted into ChatGPT
+    successfully, and the agent log had nothing at all for the second copy.
+    """
+
+    SENSITIVE = "Sarah Okafor, Manchester"
+
+    def _drive(self, clipboard_script):
+        """Run the real loop over a scripted clipboard, one entry per poll."""
+        steps = iter(clipboard_script)
+        stop = threading.Event()
+        seen = []
+
+        def fake_paste():
+            try:
+                return next(steps)
+            except StopIteration:
+                stop.set()
+                return ""
+
+        client = MagicMock()
+        client.classify.side_effect = lambda text=None, **kw: (
+            seen.append(text)
+            or {"risk_score": 0.7, "sensitive": True,
+                "detections": [{"type": "edm:customers:row", "value": "1 record(s)",
+                                "rule": "GDPR", "confidence": 0.99}]}
+        )
+        blocker = MagicMock()
+        blocker.check_and_block.return_value = "BLOCK"
+
+        with patch("clipboard_watcher.pyperclip.paste", side_effect=fake_paste), \
+             patch("clipboard_watcher._get_clipboard_files", return_value=()), \
+             patch("clipboard_watcher.time.monotonic", return_value=1.0):
+            cw._clipboard_loop(client, "agent-1", MagicMock(), stop, blocker)
+
+        return seen, blocker
+
+    def test_recopying_the_same_content_after_a_block_is_still_caught(self):
+        # poll 1: user copies sensitive        -> detected, blocked
+        # poll 2: user re-copied it ALREADY    -> must be detected AGAIN
+        seen, blocker = self._drive([self.SENSITIVE, self.SENSITIVE])
+
+        assert blocker.check_and_block.call_count == 2, (
+            "the re-copy was skipped as 'unchanged' -- it is unblocked and "
+            "unlogged, and the sensitive text stays on the clipboard"
+        )
+        assert seen == [self.SENSITIVE, self.SENSITIVE]
+
+    def test_the_agents_own_block_message_is_still_never_classified(self):
+        # The normal path: block, the clear lands, the loop sees its own
+        # message and must skip it without a classify round trip.
+        seen, blocker = self._drive([self.SENSITIVE, cw._DLP_BLOCK_MSG, cw._DLP_BLOCK_MSG])
+
+        assert seen == [self.SENSITIVE]
+        assert blocker.check_and_block.call_count == 1
+
+    def test_unrelated_repeated_content_is_still_only_classified_once(self):
+        # The dedup that `prev` exists for must survive: content that was NOT
+        # blocked should not be re-classified on every poll.
+        steps = ["ordinary meeting notes"] * 3
+        stop = threading.Event()
+        seen = []
+        it = iter(steps)
+
+        def fake_paste():
+            try: return next(it)
+            except StopIteration:
+                stop.set(); return ""
+
+        client = MagicMock()
+        client.classify.side_effect = lambda text=None, **kw: (
+            seen.append(text) or {"risk_score": 0.0, "sensitive": False, "detections": []}
+        )
+        blocker = MagicMock()
+        with patch("clipboard_watcher.pyperclip.paste", side_effect=fake_paste), \
+             patch("clipboard_watcher._get_clipboard_files", return_value=()):
+            cw._clipboard_loop(client, "agent-1", MagicMock(), stop, blocker)
+
+        assert len(seen) == 1, "non-sensitive content must not be re-classified every poll"

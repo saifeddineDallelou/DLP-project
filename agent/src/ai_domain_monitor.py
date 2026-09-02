@@ -29,6 +29,13 @@ from review_prompt import prompt_review_request
 # ── Tuning constants ──────────────────────────────────────────────────────────
 
 _POLL_INTERVAL       = 1.0   # seconds between background scans (down from 10 s)
+# The exact text written over sensitive clipboard content. Defined HERE, in
+# the module that writes it, and imported by clipboard_watcher, which skips
+# any clipboard content starting with it. The two must match exactly or the
+# watcher re-classifies the agent's own block message on every clear -- so it
+# gets one definition, not a copy in each file.
+_DLP_BLOCK_MSG = "[BLOCKED BY DLP - Sensitive content detected]"
+
 _ALERT_COOLDOWN      = 60.0  # min seconds between API reports per platform
 _CLIP_CLEAR_COOLDOWN = 5.0   # min seconds between clipboard overwrites
 _PROC_CACHE_TTL      = 2.0   # cache process-list scan for 2 s (called from 2 threads)
@@ -460,19 +467,33 @@ class AiBlocker:
 
         now = time.monotonic()
 
-        # ── STEP 1: clear clipboard (5 s cooldown, per-platform) -- skipped for ALERT ───
+        # ── STEP 1: clear the clipboard -- skipped only for ALERT ──────────────
+        # The clear is UNCONDITIONAL. It used to be gated behind
+        # _CLIP_CLEAR_COOLDOWN, which meant that for five seconds after any
+        # block, sensitive content heading for an AI window was deliberately
+        # left in place -- and because the "not cleared" message was written
+        # inside the _ALERT_COOLDOWN branch below, it was left in place
+        # SILENTLY. Get blocked once, copy again straight away, and the paste
+        # went through with nothing in the log to say so.
+        #
+        # There is no situation in which the right answer is to leave a
+        # customer record on the clipboard with ChatGPT in the foreground, so
+        # the cooldown no longer gates the action. It now only damps the log
+        # volume, which is all it was ever really needed for: a repeated clear
+        # cannot loop, because clipboard_watcher recognises this exact block
+        # message and skips it without a classify round trip.
         do_clear = False
         if action != "ALERT":
             with self._lock:
                 since_clear = now - self._last_clip_clear.get(detected_plat, 0.0)
-                do_clear    = since_clear >= _CLIP_CLEAR_COOLDOWN
-                if do_clear:
-                    self._last_clip_clear[detected_plat] = now
+                announce = since_clear >= _CLIP_CLEAR_COOLDOWN
+                self._last_clip_clear[detected_plat] = now
 
-            if do_clear:
-                try:
-                    pyperclip.copy("[BLOCKED BY DLP - Sensitive content detected]")
-                    block_ms = (time.monotonic() - t_detect) * 1000
+            do_clear = True
+            try:
+                pyperclip.copy(_DLP_BLOCK_MSG)
+                block_ms = (time.monotonic() - t_detect) * 1000
+                if announce:
                     logger.success(
                         f"[SPEED] Detection-to-block ({source_tag}): {block_ms:.0f} ms | "
                         f"platform={detected_plat}"
@@ -481,8 +502,15 @@ class AiBlocker:
                         f"[AI-MONITOR] *** CLIPBOARD CLEARED ***  "
                         f"platform={detected_plat}  Paste is now BLOCKED"
                     )
-                except Exception as exc:
-                    logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
+                else:
+                    # Still a real block -- only the shouting is throttled.
+                    logger.info(
+                        f"[AI-MONITOR] Clipboard cleared again ({block_ms:.0f} ms) "
+                        f"| platform={detected_plat}"
+                    )
+            except Exception as exc:
+                do_clear = False
+                logger.error(f"[AI-MONITOR] Clipboard clear FAILED: {exc}")
 
         # ── STEP 2: report to backend (60 s per-platform cooldown) ────────────
         with self._lock:

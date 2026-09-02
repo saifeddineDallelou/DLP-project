@@ -21,7 +21,7 @@ from loguru import logger
 
 from api_client      import DLPApiClient
 from agent_state     import AgentState
-from ai_domain_monitor import AiBlocker, _get_foreground_title
+from ai_domain_monitor import AiBlocker, _get_foreground_title, _DLP_BLOCK_MSG
 from evidence        import safe_sample
 from file_extractor  import extract
 from file_watcher    import _risk_to_severity
@@ -33,7 +33,6 @@ _MAX_CLASSIFY    = 5_000  # max chars sent to classifier
 _LOG_ALIVE_EVERY = 100    # alive log every 100 polls ≈ every 30 s
 _MAX_FILE_SIZE   = 20 * 1024 * 1024  # skip anything larger, same cap as file_watcher
 
-_DLP_BLOCK_MSG = "[BLOCKED BY DLP - Sensitive content detected]"
 
 _CF_HDROP = 15  # Windows clipboard format id for a file-drop list
 
@@ -361,6 +360,22 @@ def _clipboard_loop(
                     "[CLIPBOARD] Immediate block applied -- "
                     "AI window was active at copy time"
                 )
+                # The blocker just overwrote the clipboard, but `prev` still
+                # holds the SENSITIVE text from above. If the user re-copies
+                # that same text before the next poll -- which is exactly what
+                # someone does after a paste fails -- the `current == prev`
+                # check at the top of the loop reads it as "nothing changed"
+                # and skips it entirely: not classified, not blocked, not
+                # logged. The data then sits in the clipboard, pasteable, and
+                # `prev` stays stuck on it so it never fires for that content
+                # again.
+                #
+                # Found by watching a real block get bypassed on the retry.
+                # Clearing `prev` forces the next poll to re-evaluate whatever
+                # is actually on the clipboard. That costs one extra iteration
+                # in the normal case, where the block message is caught by the
+                # guard above before any classify round trip.
+                prev = None
             elif action_taken == "ALERT":
                 # Also already reported internally by check_and_block().
                 logger.warning("[CLIPBOARD] Policy set to ALERT -- reporting without blocking")

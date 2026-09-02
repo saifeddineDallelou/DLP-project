@@ -105,14 +105,45 @@ class TestAiBlocker:
 
         resolver.resolve.assert_called_once_with(detections)
 
-    def test_clipboard_clear_respects_cooldown(self):
+    def test_clipboard_is_cleared_every_time_not_just_once_per_cooldown(self):
+        """Regression: the clear used to be gated behind _CLIP_CLEAR_COOLDOWN.
+
+        For five seconds after any block, sensitive content bound for an AI
+        window was deliberately left on the clipboard -- and silently, because
+        the "not cleared" line was written inside the 60s _ALERT_COOLDOWN
+        branch. Get blocked once, copy again immediately, and the paste went
+        through with nothing in the log to say it had.
+
+        The person who was just blocked is the one who copies again, so that
+        window is the worst possible moment to stop enforcing. The clear is
+        now unconditional; the cooldown only damps log volume.
+        """
         blocker, client = self._make_blocker()
         with patch.object(blocker, "_detect_platform", return_value=("GROK", "window='Grok'")):
             with patch("ai_domain_monitor.pyperclip.copy") as mock_copy:
                 blocker.check_and_block(t_detect=time.monotonic())
-                blocker.check_and_block(t_detect=time.monotonic())  # within 5s cooldown
+                blocker.check_and_block(t_detect=time.monotonic())  # within 5s
+                blocker.check_and_block(t_detect=time.monotonic())  # and again
 
-        assert mock_copy.call_count == 1
+        assert mock_copy.call_count == 3, (
+            "every sensitive copy must be cleared -- a cooldown on the ACTION "
+            "leaves customer data on the clipboard with an AI window focused"
+        )
+        for call in mock_copy.call_args_list:
+            assert call.args[0] == aidm._DLP_BLOCK_MSG
+
+    def test_an_alert_policy_still_never_clears(self):
+        # ALERT is the one case that legitimately does not clear. Making the
+        # clear unconditional must not have swept that up.
+        client = MagicMock()
+        client.report_ai_leak_attempt.return_value = {"id": "a1"}
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "ALERT", "name": "Alert"}
+        blocker = AiBlocker(client, "agent-1", policy_resolver=resolver)
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")):
+            with patch("ai_domain_monitor.pyperclip.copy") as mock_copy:
+                blocker.check_and_block(t_detect=time.monotonic())
+        mock_copy.assert_not_called()
 
     def test_alert_report_respects_per_platform_cooldown(self):
         blocker, client = self._make_blocker()
