@@ -1007,3 +1007,98 @@ class TestRenamedAiTab:
         with patch("ai_domain_monitor._enum_all_windows", return_value=[(600, "Notepad")]):
             b.observe_ai_windows()
         assert b._ai_windows == {}
+
+
+class TestExtensionOverridesGuessing:
+    """
+    The sensor turns a guess into a fact. What matters is that its NEGATIVE
+    is trusted too -- "no AI tab is open" is exactly the answer the
+    window-title tiers get wrong, and getting it wrong is what made a closed
+    ChatGPT tab keep blocking pastes for fifteen minutes.
+    """
+
+    def _blocker(self):
+        return AiBlocker(MagicMock(), "agent-1")
+
+    def _sensor(self, platform, detail="chatgpt.com", live=True):
+        import browser_sensor
+        browser_sensor.STATE.record(platform, detail)
+        if not live:
+            with browser_sensor.STATE._lock:
+                browser_sensor.STATE._last_contact = 0.0
+        return browser_sensor
+
+    def teardown_method(self):
+        import browser_sensor
+        browser_sensor.STATE.record(None, "")
+        with browser_sensor.STATE._lock:
+            browser_sensor.STATE._last_contact = 0.0
+
+    def test_the_extension_answers_before_any_window_is_examined(self):
+        b = self._blocker()
+        self._sensor("OPENAI_CHATGPT", "chatgpt.com")
+        with patch("ai_domain_monitor._enum_all_windows") as enum:
+            plat, source = b._detect_platform()
+        assert plat == "OPENAI_CHATGPT"
+        assert source == "extension='chatgpt.com'"
+        enum.assert_not_called()      # no need to guess at all
+
+    def test_a_closed_tab_stops_the_block_immediately(self):
+        # The live false positive: the ChatGPT TAB was closed, the browser
+        # WINDOW stayed open, and the remembered-window tier kept blocking
+        # pastes that were going nowhere. The extension knows the difference.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+        assert 500 in b._ai_windows          # the guess is there...
+
+        self._sensor(None, "")               # ...and the extension says no.
+        with patch("ai_domain_monitor._enum_all_windows",
+                   return_value=[(500, "Acces rapide - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            plat, _ = b._detect_platform()
+
+        assert plat is None
+
+    def test_without_the_extension_the_window_tiers_still_run(self):
+        # An unmanaged machine, or a browser with no extension installed:
+        # behaviour has to fall back, not fail closed or fail open.
+        b = self._blocker()
+        self._sensor(None, "", live=False)
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert plat == "OPENAI_CHATGPT"
+        assert source.startswith("window=")
+
+    def test_the_remembered_tier_is_skipped_while_the_extension_is_live(self):
+        # Both could answer; the extension must win, because the memory
+        # cannot tell a renamed tab from a closed one and the extension can.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+
+        self._sensor("ANTHROPIC_CLAUDE", "claude.ai")
+        with patch("ai_domain_monitor._enum_all_windows",
+                   return_value=[(500, "Some conversation - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")):
+            plat, source = b._detect_platform()
+
+        assert plat == "ANTHROPIC_CLAUDE"
+        assert source.startswith("extension=")
+
+    def test_a_desktop_app_is_still_found_when_the_browser_has_no_ai_tab(self):
+        # The extension only speaks for browsers. A desktop Claude app has to
+        # remain detectable by the process tier.
+        b = self._blocker()
+        self._sensor(None, "")
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(700, "Claude")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, _ = b._detect_platform()
+
+        assert plat == "ANTHROPIC_CLAUDE"

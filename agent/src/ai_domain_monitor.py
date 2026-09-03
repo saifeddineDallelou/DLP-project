@@ -25,6 +25,7 @@ from pywinauto import Desktop
 from api_client  import DLPApiClient
 from agent_state import AgentState
 from review_prompt import prompt_review_request
+import browser_sensor
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
 
@@ -445,6 +446,24 @@ class AiBlocker:
           4. Running-process name match (cached 2 s) -- catches a desktop
              app with no matching window title at all.
         """
+        # The browser extension, when it is installed and reporting.
+        #
+        # It sees TABS; every tier below sees only windows, and a browser puts
+        # every tab in one window. That mismatch produced three separate
+        # failures found by testing -- a renamed tab going invisible, an
+        # accessibility tree that does not exist on Opera, and a remembered
+        # window that kept blocking after its AI tab was closed. None are
+        # solvable from outside the browser.
+        #
+        # A negative from the extension is as authoritative as a positive:
+        # "no AI tab is open" is precisely the answer the window tiers get
+        # wrong, so when the sensor is live its browser verdict stands and
+        # the remembered-window tier is skipped entirely.
+        sensor_live = browser_sensor.STATE.is_live()
+        sensor_plat, sensor_detail = browser_sensor.STATE.current()
+        if sensor_plat:
+            return sensor_plat, f"extension='{sensor_detail}'"
+
         windows = _enum_all_windows()
 
         # The FOREGROUND window first, when it is itself an AI platform.
@@ -492,7 +511,10 @@ class AiBlocker:
         # Deliberately ahead of the address-bar and process tiers: it is a
         # dictionary lookup rather than a UI Automation walk, and it is the
         # case those tiers were supposed to cover and cannot on every browser.
-        remembered = self._recall_ai_window(windows)
+        # Skipped when the extension is live: it already answered for
+        # browsers, and this tier's whole failure mode is not knowing when a
+        # tab was closed -- which the extension does know.
+        remembered = None if sensor_live else self._recall_ai_window(windows)
         if remembered:
             # The evidence arrives already quoted -- it may name two titles,
             # the one that identified the window and the one it wears now.

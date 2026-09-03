@@ -27,6 +27,7 @@ from app_launch_monitor import start_app_launch_monitor
 from file_dialog_monitor import start_file_dialog_monitor
 from app_file_monitor    import start_app_file_monitor
 from drag_drop_monitor  import start_drag_drop_monitor
+from browser_sensor     import start_browser_sensor
 
 _STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -227,6 +228,11 @@ def main() -> None:
 
     # ── 10. Drag-drop monitor (cancels a sensitive Explorer drag onto an AI tab) ──
     start_drag_drop_monitor(client, agent_id or "", stop, policy_resolver)
+
+    # Not a monitor -- a listener. The browser extension reports which AI
+    # tab is active, which is the one thing the window-title tiers cannot
+    # see. Optional: without it the agent falls back to those tiers.
+    start_browser_sensor(stop)
     logger.info("[10/10] Drag-drop monitor started")
 
     logger.success(

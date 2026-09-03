@@ -13,6 +13,7 @@ The system is built from four independent components:
 | [`backend/`](#backend--control-plane) | Node, Express, Prisma, PostgreSQL | Decides **what the rules are**. Stores policies, incidents, agents, behaviour data. |
 | [`agent/`](#agent--windows-endpoint-monitor) | Python | Decides **when to act**. Runs on the endpoint, watches 9 leak channels, enforces the action. |
 | [`frontend/`](#frontend--admin-dashboard) | React, Vite, Tailwind | Where a human **sees and configures** all of it. |
+| [`extension/`](#extension--browser-sensor) | Chrome MV3 | Tells the agent **which AI tab is active**. Optional; the agent falls back to window titles without it. |
 
 A full description of how they fit together — including the request flow of a
 single leak attempt — is in [`docs/architecture.md`](docs/architecture.md).
@@ -186,7 +187,7 @@ cd agent
 pip install -r requirements.txt
 cp .env.example .env                           # then edit WATCH_DIRS
 python src/main.py
-python -m pytest -q                            # 379 tests
+python -m pytest -q                            # 396 tests
 ```
 
 **Data-at-rest discovery.** Every monitor above reacts to *activity*. None of
@@ -251,7 +252,7 @@ Configuration lives in `.env` files per component; each has a committed
 
 ```bash
 cd backend    && npm test            # 277
-cd agent      && python -m pytest -q # 379
+cd agent      && python -m pytest -q # 396
 cd classifier && python -m pytest -q # 106
 cd frontend   && npm test            # 107
 ```
