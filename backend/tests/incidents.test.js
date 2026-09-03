@@ -381,3 +381,79 @@ describe('evidence is readable', () => {
     expect(typeof res.body.incidents[0].evidence).toBe('string');
   });
 });
+
+describe('counting repeats instead of filing rows', () => {
+  // The agent blocks every occurrence, but a fresh row for each one buries
+  // the queue -- and filing only the first under a time throttle is worse: it
+  // reports a persistent attempt as a single accident.
+
+  async function anIncident(agent, policy) {
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({ agentId: agent.id, policyId: policy.id, severity: 'HIGH', channel: 'SCREENSHOT' });
+    return res.body;
+  }
+
+  test('a new incident starts at one attempt', async () => {
+    const agent = await createAgent();
+    const inc = await anIncident(agent, await createPolicy());
+    expect(inc.attempts).toBe(1);
+  });
+
+  test('repeating increments rather than creating a row', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const inc = await anIncident(agent, policy);
+
+    for (let i = 0; i < 3; i++) {
+      const res = await request(app).patch(`/api/incidents/${inc.id}/repeat`)
+        .set('x-agent-token', agent.token);
+      expect(res.status).toBe(200);
+    }
+
+    const all = await prisma.incident.findMany({ where: { policyId: policy.id } });
+    expect(all).toHaveLength(1);
+    expect(all[0].attempts).toBe(4);
+  });
+
+  test("another agent's token cannot inflate this counter", async () => {
+    const agent = await createAgent();
+    const other = await createAgent();
+    const inc = await anIncident(agent, await createPolicy());
+
+    const res = await request(app).patch(`/api/incidents/${inc.id}/repeat`)
+      .set('x-agent-token', other.token);
+    expect(res.status).toBe(401);
+
+    const after = await prisma.incident.findUnique({ where: { id: inc.id } });
+    expect(after.attempts).toBe(1);
+  });
+
+  test('an anonymous caller cannot touch it', async () => {
+    const agent = await createAgent();
+    const inc = await anIncident(agent, await createPolicy());
+    const res = await request(app).patch(`/api/incidents/${inc.id}/repeat`);
+    expect(res.status).toBe(401);
+  });
+
+  test('an unknown incident is a 404', async () => {
+    const agent = await createAgent();
+    const res = await request(app)
+      .patch('/api/incidents/00000000-0000-0000-0000-000000000000/repeat')
+      .set('x-agent-token', agent.token);
+    expect(res.status).toBe(404);
+  });
+
+  test('concurrent repeats do not lose an update', async () => {
+    // The agent reports from several threads. A read-modify-write here would
+    // undercount exactly the burst this field exists to measure.
+    const agent = await createAgent();
+    const inc = await anIncident(agent, await createPolicy());
+
+    await Promise.all(Array.from({ length: 8 }, () =>
+      request(app).patch(`/api/incidents/${inc.id}/repeat`).set('x-agent-token', agent.token)));
+
+    const after = await prisma.incident.findUnique({ where: { id: inc.id } });
+    expect(after.attempts).toBe(9);
+  });
+});

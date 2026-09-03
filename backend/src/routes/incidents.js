@@ -210,4 +210,39 @@ router.patch('/:id/request-review', async (req, res, next) => {
   }
 });
 
+// PATCH /api/incidents/:id/repeat  (agent token)
+//
+// The same thing happened again inside the reporting window.
+//
+// The agent blocks every occurrence, but filing a fresh row for each one
+// buries the queue, and filing only the first under a time throttle is worse:
+// it reports a persistent attempt as a single accident. Counting keeps one
+// row per window and lets it say how many tries it represents.
+router.patch('/:id/repeat', async (req, res, next) => {
+  try {
+    const agentToken = req.headers['x-agent-token'];
+    if (!agentToken) return res.status(401).json({ error: 'x-agent-token required' });
+
+    const incident = await prisma.incident.findUnique({ where: { id: req.params.id } });
+    if (!incident) return res.status(404).json({ error: 'Incident not found' });
+
+    const agent = await prisma.agent.findUnique({ where: { id: incident.agentId } });
+    if (!agent || agent.token !== agentToken) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Incremented in the database rather than read-modify-written here: the
+    // agent reports from several threads, and a lost update would undercount
+    // exactly the burst this field exists to measure.
+    const updated = await prisma.incident.update({
+      where: { id: req.params.id },
+      data: { attempts: { increment: 1 } },
+    });
+
+    res.json(withReadableEvidence(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

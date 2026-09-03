@@ -113,6 +113,15 @@ class DLPApiClient:
             headers=self._agent_headers,
         )
 
+    def repeat_incident(self, incident_id: str) -> dict | None:
+        """The same thing happened again inside the reporting window --
+        increment its counter rather than filing a near-identical row."""
+        return _request(
+            "PATCH",
+            f"{self.backend_url}/api/incidents/{incident_id}/repeat",
+            headers=self._agent_headers,
+        )
+
     def request_review_incident(self, incident_id: str, note: str | None) -> dict | None:
         return _request(
             "PATCH",

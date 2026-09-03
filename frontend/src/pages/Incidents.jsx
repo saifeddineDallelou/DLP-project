@@ -139,7 +139,22 @@ export default function Incidents() {
               const ChanIcon = CHANNEL_ICON[inc.channel] ?? File;
               return (
                 <tr key={inc.id} className="table-row" onClick={() => { setSelected(inc); setAdminNoteDraft(inc.adminNote ?? ''); }}>
-                  <td className="td"><Badge tone="severity" value={inc.severity} size="sm" /></td>
+                  <td className="td">
+                    <div className="flex items-center gap-1.5">
+                      <Badge tone="severity" value={inc.severity} size="sm" />
+                      {inc.attempts > 1 && (
+                        // One row saying it happened ten times, rather than
+                        // ten rows saying it happened. The count has to be
+                        // visible or it is the same as having dropped them.
+                        <span
+                          className="text-[10px] font-semibold text-ink-faint bg-white/5 px-1.5 py-0.5 rounded-full"
+                          title={`This happened ${inc.attempts} times within one reporting window`}
+                        >
+                          ×{inc.attempts}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="td">
                     <div className="flex items-center gap-1.5 text-ink-faint">
                       <ChanIcon size={13} />

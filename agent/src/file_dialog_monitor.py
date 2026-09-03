@@ -48,6 +48,7 @@ from loguru import logger
 from pywinauto import Desktop
 
 from api_client import DLPApiClient
+from repeat_window import RepeatWindow, fingerprint
 from review_prompt import offer_review
 import browser_sensor
 from ai_domain_monitor import (
@@ -217,6 +218,44 @@ def _active_ai_platform() -> str | None:
         _platform_url_cache_time = now
 
     return _platform_url_cache
+
+
+# Picking the same file for the same platform, again, is one event with a
+# count. Closing a dialog does not stop a determined user reopening it.
+_REPEATS = RepeatWindow()
+
+
+_unmatched_logged_at = 0.0
+
+
+def _log_unmatched_picker() -> None:
+    """Note the foreground window when an AI platform is active but no
+    standard dialog is open.
+
+    Throttled hard: this runs on a 0.1s poll and the interesting case is rare.
+    """
+    global _unmatched_logged_at
+    now = time.monotonic()
+    if now - _unmatched_logged_at < 5.0:
+        return
+    try:
+        platform = _active_ai_platform()
+        if not platform:
+            return
+        hwnd = _user32.GetForegroundWindow()
+        if not hwnd:
+            return
+        cls = ctypes.create_unicode_buffer(64)
+        _user32.GetClassNameW(hwnd, cls, 64)
+        title = ctypes.create_unicode_buffer(160)
+        _user32.GetWindowTextW(hwnd, title, 160)
+        _unmatched_logged_at = now
+        logger.debug(
+            f"[FILE-DIALOG] AI platform {platform} active, no standard dialog "
+            f"-- foreground class='{cls.value}' title='{title.value[:70]}'"
+        )
+    except Exception:
+        pass
 
 
 def _find_dialog_windows() -> list[int]:
@@ -409,6 +448,20 @@ def _dialog_monitor_loop(
 
         dialogs = _find_dialog_windows()
         if not dialogs:
+            # Nothing matching the standard common-dialog class is open.
+            #
+            # That is not the same as "no file is being chosen". ChatGPT's own
+            # recent-files shortcut attaches a file without ever opening a
+            # Windows dialog, and a live test walked a sensitive file straight
+            # past this monitor that way -- the Explorer route was blocked,
+            # the shortcut was not.
+            #
+            # Logged, at DEBUG, with what IS in the foreground while an AI
+            # platform is active, because the first thing needed to close that
+            # gap is knowing what kind of window to look for. Guessing at it
+            # would mean either missing it again or intercepting unrelated
+            # windows.
+            _log_unmatched_picker()
             stop.wait(_POLL_INTERVAL)
             continue
 
@@ -549,18 +602,33 @@ def _dialog_monitor_loop(
                 # second file picked in that window is never seen. Same defect
                 # as drag_drop_monitor had; fixed in the same commit.
                 def _report(pol=policy, plat=platform, fn=filename,
-                            risk=risk_score, b=blocked):
+                            risk=risk_score, b=blocked, dets=detections):
+                    sample = f"FILE:{fn}"[:100]
+                    print_ = fingerprint(sample, dets)
+                    repeat_of = _REPEATS.repeat_of(plat, print_)
+                    if repeat_of:
+                        counted = client.repeat_ai_leak_attempt(repeat_of)
+                        if counted:
+                            logger.info(
+                                f"[FILE-DIALOG] Repeat attempt counted  id={repeat_of}  "
+                                f"attempts={counted.get('attempts')}"
+                            )
+                        else:
+                            logger.error(f"[FILE-DIALOG] Could not count repeat onto {repeat_of}")
+                        return
+
                     attempt = client.report_ai_leak_attempt(
                         agent_id=agent_id,
                         policy_id=pol.get("id"),
                         platform=plat,
                         method="BROWSER",
-                        content_sample=f"FILE:{fn}"[:100],
+                        content_sample=sample,
                         risk_score=risk,
                         blocked=b,
                     )
                     if attempt:
                         logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
+                        _REPEATS.opened(plat, attempt.get("id"))
                         if b and attempt.get("id"):
                             # The dialog was closed under the user. Without a
                             # word from us that reads as the upload button

@@ -62,6 +62,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from evidence import safe_sample
+from repeat_window import RepeatWindow, fingerprint
 from review_prompt import offer_review
 from file_extractor import extract
 from quarantine import quarantine_file
@@ -72,10 +73,24 @@ _VK_LBUTTON = 0x01
 _VK_ESCAPE = 0x1B
 _KEYEVENTF_KEYUP = 0x0002
 
-# Fast enough to see the cursor cross into a browser mid-drag. A drag lasts
-# hundreds of milliseconds at minimum -- a human cannot move a mouse from
-# Explorer to a browser window faster than this samples.
+# Idle sampling: fast enough to notice a drag starting without spinning a
+# core when nothing is happening.
 _POLL_INTERVAL = 0.05
+
+# Sampling once a SENSITIVE drag is in flight.
+#
+# The idle rate used to be the only rate, on the reasoning that nobody can
+# move a mouse from Explorer to a browser in under 50ms. They can: a practised
+# drop lands between two polls, and the file is delivered before the cancel is
+# sent -- the popup then appears after the fact, which is worse than useless
+# because it claims a block that did not happen.
+#
+# This narrows the window rather than closing it. Polling cannot close it: a
+# drop is a single instant and there is always some interval to fall inside.
+# Closing it properly means registering a real OLE drop target, which is a
+# different piece of work. The cost of sampling this fast is paid only while
+# a sensitive drag is actually moving, which is rare and lasts under a second.
+_ACTIVE_POLL_INTERVAL = 0.01
 
 _MAX_FILE_SIZE = 20 * 1024 * 1024   # same cap as file_watcher
 _CLASSIFY_LIMIT = 10_000
@@ -224,6 +239,12 @@ def _classify_paths(client: DLPApiClient, paths: list[str]) -> dict | None:
     return worst
 
 
+# Dragging the same file at the same platform, again, inside one window is
+# one event with a count -- not a fresh row each time. Retesting a block ten
+# times should leave a row saying it happened ten times.
+_REPEATS = RepeatWindow()
+
+
 def _platform_from_browser(target_title: str) -> str | None:
     """The AI platform the browser says is active, if the drop target is one.
 
@@ -317,10 +338,17 @@ def _drag_loop(
             stop.wait(_POLL_INTERVAL)
             continue
 
+        # A verdict that is in and sensitive means the next few hundred
+        # milliseconds decide whether this file leaves. Sample accordingly.
+        verdict_so_far = state.verdict
+        interval = (_ACTIVE_POLL_INTERVAL
+                    if verdict_so_far and verdict_so_far["risk_score"] > 0.5
+                    else _POLL_INTERVAL)
+
         x, y = _cursor_pos()
         target = _root_window_at(x, y)
         if not target or target == state.origin_hwnd:
-            stop.wait(_POLL_INTERVAL)
+            stop.wait(interval)
             continue
 
         target_title = _window_text(target)
@@ -350,7 +378,10 @@ def _drag_loop(
             # Classification still running. Nothing is claimed either way --
             # if the user drops now the file goes through, and saying
             # otherwise would be a lie told by the tool about itself.
-            stop.wait(_POLL_INTERVAL)
+            #
+            # Sampled at the fast rate regardless: the verdict may land in the
+            # next few milliseconds, and the cursor is already over a target.
+            stop.wait(_ACTIVE_POLL_INTERVAL)
             continue
 
         if verdict["risk_score"] <= 0.5:
@@ -408,17 +439,36 @@ def _drag_loop(
         # dragging a real file, not by reading the code: the unit tests mock the
         # client, so a slow client costs them nothing.
         def _report(v=verdict, p=policy, plat=platform, b=blocked, f=filename):
+            sample = safe_sample(v["detections"], prefix=f"DRAG:{f}")
+            print_ = fingerprint(sample, v["detections"])
+            repeat_of = _REPEATS.repeat_of(plat, print_)
+            if repeat_of:
+                # Same file, same platform, still inside the window. One row
+                # that says how many times, rather than a queue of identical
+                # rows -- and no second popup, since the window that opened
+                # already warned about exactly this.
+                counted = client.repeat_ai_leak_attempt(repeat_of)
+                if counted:
+                    logger.info(
+                        f"[DRAG-DROP] Repeat attempt counted  id={repeat_of}  "
+                        f"attempts={counted.get('attempts')}"
+                    )
+                else:
+                    logger.error(f"[DRAG-DROP] Could not count repeat onto {repeat_of}")
+                return
+
             attempt = client.report_ai_leak_attempt(
                 agent_id=agent_id,
                 policy_id=p.get("id"),
                 platform=plat,
                 method="BROWSER",
-                content_sample=safe_sample(v["detections"], prefix=f"DRAG:{f}"),
+                content_sample=sample,
                 risk_score=v["risk_score"],
                 blocked=b,
             )
             if attempt:
                 logger.success(f"[DRAG-DROP] Leak attempt recorded: id={attempt.get('id')}")
+                _REPEATS.opened(plat, attempt.get("id"))
                 if b and attempt.get("id"):
                     # The drag was cancelled: the file simply did not arrive,
                     # with nothing on screen to say why. A block nobody can

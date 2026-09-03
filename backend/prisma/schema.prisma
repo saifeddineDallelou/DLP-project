@@ -123,6 +123,13 @@ model Incident {
   // reconstructed -- guessing from the current policy is exactly the mistake
   // this field prevents.
   actionTaken  Action?        @map("action_taken")
+  // How many times this same thing happened inside one reporting window.
+  //
+  // A single row with attempts=10 says "someone did this ten times" -- ten
+  // near-identical rows say the same thing while burying every other incident
+  // in the queue. The AI leak table has carried this since the clipboard path
+  // needed it; screenshots now need it for the same reason.
+  attempts     Int            @default(1)
   assignedToId String?        @map("assigned_to_id")
   resolvedAt   DateTime?      @map("resolved_at")
   createdAt    DateTime       @default(now()) @map("created_at")

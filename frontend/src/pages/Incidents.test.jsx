@@ -182,3 +182,29 @@ describe('which file, which content', () => {
     expect(screen.getByText('—')).toBeInTheDocument();
   });
 });
+
+describe('repeats are counted, not multiplied', () => {
+  // Retesting a block ten times should leave one row saying it happened ten
+  // times. The count only helps if it is on screen -- otherwise suppressing
+  // the extra rows just loses the information.
+
+  test('a repeated incident shows how many times', async () => {
+    mockIncidents([incident({ attempts: 10 })]);
+    render(<Incidents />);
+    expect(await screen.findByText('×10')).toBeInTheDocument();
+  });
+
+  test('a single occurrence shows no count', async () => {
+    mockIncidents([incident({ attempts: 1 })]);
+    render(<Incidents />);
+    await screen.findByRole('table');
+    expect(screen.queryByText('×1')).not.toBeInTheDocument();
+  });
+
+  test('an older incident without the field is unaffected', async () => {
+    mockIncidents([incident({ attempts: undefined })]);
+    render(<Incidents />);
+    await screen.findByRole('table');
+    expect(screen.queryByText(/^×/)).not.toBeInTheDocument();
+  });
+});

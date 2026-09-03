@@ -31,6 +31,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from policy_resolver import PolicyResolver, DEFAULT_POLICY_ID
+from repeat_window import RepeatWindow, fingerprint
 from review_prompt import offer_review
 
 # Confidence for the TITLE-HEURISTIC path, which never calls the classifier:
@@ -40,6 +41,11 @@ from review_prompt import offer_review
 # and the NameError killed the entire screenshot thread on the first capture.
 # Every screenshot after that was unmonitored, silently.
 _TITLE_HEURISTIC_RISK = 0.75
+
+# Capturing the same window again is one event with a count. Screenshots are
+# the easiest action here to repeat by accident -- the key is right there --
+# so this matters more, not less, than on the other channels.
+_REPEATS = RepeatWindow()
 
 _POLICY_ID      = DEFAULT_POLICY_ID  # fallback when no PolicyResolver is supplied
 _COOLDOWN_SECS  = 5.0    # min seconds between reactions (debounce rapid presses)
@@ -442,6 +448,19 @@ def _screenshot_loop(
             else:
                 logger.error("[SCREENSHOT] Failed to post UEBA event")
 
+            print_ = fingerprint(title[:255], detections)
+            repeat_of = _REPEATS.repeat_of("SCREENSHOT", print_)
+            if repeat_of:
+                counted = client.repeat_incident(repeat_of)
+                if counted:
+                    logger.info(
+                        f"[SCREENSHOT] Repeat capture counted  id={repeat_of}  "
+                        f"attempts={counted.get('attempts')}"
+                    )
+                else:
+                    logger.error(f"[SCREENSHOT] Could not count repeat onto {repeat_of}")
+                continue
+
             incident = client.create_incident(
                 agent_id=agent_id,
                 policy_id=policy["id"],
@@ -451,6 +470,7 @@ def _screenshot_loop(
                 risk_score=_TITLE_HEURISTIC_RISK,
             )
             if incident:
+                _REPEATS.opened("SCREENSHOT", incident.get("id"))
                 logger.success(
                     f"[SCREENSHOT] Incident created: "
                     f"id={incident.get('id')} [HIGH] blocked={cleared}"

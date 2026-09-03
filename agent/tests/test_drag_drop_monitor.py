@@ -378,3 +378,27 @@ class TestDropTargetAsksTheBrowser:
         # A missing extension must not raise into the drag loop.
         with patch("ai_domain_monitor._is_browser_window", side_effect=ImportError):
             assert ddm._platform_from_browser("anything") is None
+
+
+class TestSamplingRateWhileADragIsInFlight:
+    """
+    A practised drop lands between two polls: the file is delivered before the
+    cancel is sent, and the popup then appears after the fact -- claiming a
+    block that did not happen, which is worse than no popup at all.
+
+    Sampling faster narrows the window. It cannot close it: a drop is a single
+    instant and there is always some interval to fall inside. Closing it
+    properly means registering a real OLE drop target.
+    """
+
+    def test_the_active_rate_is_faster_than_the_idle_one(self):
+        assert ddm._ACTIVE_POLL_INTERVAL < ddm._POLL_INTERVAL
+
+    def test_the_active_rate_is_fast_enough_to_matter(self):
+        # 50ms was demonstrably too slow against a real drop.
+        assert ddm._ACTIVE_POLL_INTERVAL <= 0.02
+
+    def test_the_idle_rate_is_unchanged(self):
+        # The fast rate is paid only during a sensitive drag. Spending it
+        # while nothing is happening would burn a core on every endpoint.
+        assert ddm._POLL_INTERVAL == 0.05
