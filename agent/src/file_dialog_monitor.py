@@ -48,6 +48,7 @@ from loguru import logger
 from pywinauto import Desktop
 
 from api_client import DLPApiClient
+from review_prompt import offer_review
 import browser_sensor
 from ai_domain_monitor import (
     _detect_platform_in_text,
@@ -242,17 +243,74 @@ def _find_dialog_windows() -> list[int]:
     return hwnds
 
 
-def _get_dialog_filename(hwnd_dialog: int) -> str:
-    """Read the current text of the dialog's 'File name' field."""
-    edit_hwnd = _user32.GetDlgItem(hwnd_dialog, _FILENAME_CTRL_ID)
-    if not edit_hwnd:
-        return ""
-    length = _user32.SendMessageW(edit_hwnd, _WM_GETTEXTLENGTH, 0, 0)
+def _window_text(hwnd: int) -> str:
+    """WM_GETTEXT against one control."""
+    length = _user32.SendMessageW(hwnd, _WM_GETTEXTLENGTH, 0, 0)
     if length <= 0:
         return ""
     buf = ctypes.create_unicode_buffer(length + 1)
-    _user32.SendMessageW(edit_hwnd, _WM_GETTEXT, length + 1, buf)
-    return buf.value.strip().strip('"')
+    _user32.SendMessageW(hwnd, _WM_GETTEXT, length + 1, buf)
+    return buf.value
+
+
+def _find_edit_descendant(hwnd: int, depth: int = 0) -> int:
+    """The first Edit control at or below `hwnd`.
+
+    The "File name" control is not an Edit. It is a ComboBoxEx32 wrapping a
+    ComboBox wrapping the actual Edit, and WM_GETTEXT sent to the outer
+    wrapper returns nothing at all -- which is why the field read as empty on
+    every poll while a ChatGPT upload dialog sat open with a file selected.
+    The text has to be read from the Edit itself.
+
+    Depth-limited: this walks a window tree owned by another process, and a
+    malformed or hostile hierarchy must not turn a 0.1s poll into a hang.
+    """
+    if depth > 4:
+        return 0
+    found: list[int] = []
+
+    def _cb(child, _lparam):
+        try:
+            buf = ctypes.create_unicode_buffer(64)
+            _user32.GetClassNameW(child, buf, 64)
+            if buf.value == "Edit":
+                found.append(child)
+                return False            # stop enumerating
+            deeper = _find_edit_descendant(child, depth + 1)
+            if deeper:
+                found.append(deeper)
+                return False
+        except Exception:
+            pass
+        return True
+
+    try:
+        _user32.EnumChildWindows(hwnd, _WNDENUMPROC(_cb), 0)
+    except Exception:
+        return 0
+    return found[0] if found else 0
+
+
+def _get_dialog_filename(hwnd_dialog: int) -> str:
+    """Read the current text of the dialog's 'File name' field."""
+    combo = _user32.GetDlgItem(hwnd_dialog, _FILENAME_CTRL_ID)
+    if combo:
+        # The wrapper first -- on the rare dialog where it does answer, this
+        # is one message instead of a tree walk.
+        text = _window_text(combo).strip().strip('"')
+        if text:
+            return text
+        edit = _find_edit_descendant(combo)
+        if edit:
+            text = _window_text(edit).strip().strip('"')
+            if text:
+                return text
+
+    # Last resort: any Edit under the dialog carrying text. A file dialog has
+    # exactly one text field the user types into, and reading nothing at all
+    # is the failure this exists to avoid.
+    edit = _find_edit_descendant(hwnd_dialog)
+    return _window_text(edit).strip().strip('"') if edit else ""
 
 
 def _get_dialog_folder(hwnd_dialog: int) -> str | None:
@@ -503,6 +561,15 @@ def _dialog_monitor_loop(
                     )
                     if attempt:
                         logger.success(f"[FILE-DIALOG] Leak attempt recorded: id={attempt.get('id')}")
+                        if b and attempt.get("id"):
+                            # The dialog was closed under the user. Without a
+                            # word from us that reads as the upload button
+                            # being broken.
+                            offer_review(
+                                client, "attempt", attempt["id"],
+                                f"'{fn}' was blocked from being uploaded to {plat}.",
+                                "FILE-DIALOG",
+                            )
                     else:
                         logger.error("[FILE-DIALOG] Failed to record leak attempt -- backend may be down")
 

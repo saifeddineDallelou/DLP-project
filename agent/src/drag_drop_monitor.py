@@ -62,6 +62,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from evidence import safe_sample
+from review_prompt import offer_review
 from file_extractor import extract
 from quarantine import quarantine_file
 
@@ -418,6 +419,15 @@ def _drag_loop(
             )
             if attempt:
                 logger.success(f"[DRAG-DROP] Leak attempt recorded: id={attempt.get('id')}")
+                if b and attempt.get("id"):
+                    # The drag was cancelled: the file simply did not arrive,
+                    # with nothing on screen to say why. A block nobody can
+                    # see is indistinguishable from the tool being broken.
+                    offer_review(
+                        client, "attempt", attempt["id"],
+                        f"'{f}' was blocked from being dragged into {plat}.",
+                        "DRAG-DROP",
+                    )
             else:
                 logger.error("[DRAG-DROP] Failed to record leak attempt")
 

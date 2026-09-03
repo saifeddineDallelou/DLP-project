@@ -31,6 +31,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from policy_resolver import PolicyResolver, DEFAULT_POLICY_ID
+from review_prompt import offer_review
 
 # Confidence for the TITLE-HEURISTIC path, which never calls the classifier:
 # a sensitive-looking window title is real evidence but weaker than a content
@@ -454,6 +455,15 @@ def _screenshot_loop(
                     f"[SCREENSHOT] Incident created: "
                     f"id={incident.get('id')} [HIGH] blocked={cleared}"
                 )
+                if cleared and incident.get("id"):
+                    # The capture was wiped from the clipboard. Pasting it
+                    # produces nothing, and without a word from us that looks
+                    # like the screenshot key having failed.
+                    offer_review(
+                        client, "incident", incident["id"],
+                        "A screenshot of a window holding sensitive content was blocked.",
+                        "SCREENSHOT",
+                    )
             else:
                 logger.error("[SCREENSHOT] Failed to create incident")
 

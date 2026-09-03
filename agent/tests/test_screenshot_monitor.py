@@ -270,4 +270,3 @@ class TestTitleHeuristicDoesNotKillTheThread:
         source = pathlib.Path(screenshot_monitor.__file__).read_text(encoding="utf-8")
         assert "risk_score=0.75," not in source
         assert "_TITLE_HEURISTIC_RISK" in source
-

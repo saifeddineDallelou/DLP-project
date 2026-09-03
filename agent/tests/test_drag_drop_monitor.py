@@ -378,4 +378,3 @@ class TestDropTargetAsksTheBrowser:
         # A missing extension must not raise into the drag loop.
         with patch("ai_domain_monitor._is_browser_window", side_effect=ImportError):
             assert ddm._platform_from_browser("anything") is None
-

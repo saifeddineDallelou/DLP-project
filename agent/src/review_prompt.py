@@ -87,3 +87,47 @@ def prompt_review_request(reason: str, timeout: float = _TIMEOUT_SECONDS) -> str
         return None
 
     return result["note"] if result["requested"] else None
+
+
+def offer_review(client, kind: str, record_id: str, reason: str, tag: str) -> None:
+    """Tell the user what was blocked, and let them ask an admin to look.
+
+    Every channel that stops something owes the user an explanation. Drag and
+    drop, screenshots and file-picker uploads were all blocking silently: the
+    file simply did not arrive, with nothing on screen to say why or any way
+    to object. A block nobody can see is indistinguishable from the tool being
+    broken -- and that is how a DLP agent gets uninstalled.
+
+    `kind` is "incident" or "attempt", because the two are recorded in
+    different tables and reviewed through different endpoints.
+
+    Runs on its own thread: prompt_review_request blocks until the user
+    answers or it times out, and no monitor's poll loop may wait on a person.
+    The block itself has already been applied before this is ever called.
+    """
+    import threading
+    from loguru import logger
+
+    def _run() -> None:
+        # Logged BEFORE the dialog blocks on the user. Without this, "shown
+        # and dismissed" and "never rendered" are the same silence -- and the
+        # second is a real failure mode, since this is a tkinter window on
+        # someone else's desktop.
+        logger.info(f"[{tag}] Review prompt shown  id={record_id}")
+        note = prompt_review_request(reason)
+        if note is None:
+            logger.info(f"[{tag}] Review prompt dismissed  id={record_id}")
+            return
+
+        if kind == "attempt":
+            result = client.request_review_ai_leak_attempt(record_id, note or None)
+        else:
+            result = client.request_review_incident(record_id, note or None)
+
+        if result:
+            logger.success(f"[{tag}] Review requested  id={record_id}")
+        else:
+            logger.error(f"[{tag}] Failed to record review request to backend")
+
+    threading.Thread(target=_run, daemon=True, name="review-prompt").start()
+
