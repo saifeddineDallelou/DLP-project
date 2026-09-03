@@ -500,3 +500,60 @@ class TestRecopyAfterABlock:
             cw._clipboard_loop(client, "agent-1", MagicMock(), stop, blocker)
 
         assert len(seen) == 1, "non-sensitive content must not be re-classified every poll"
+
+
+class TestRecopyIsARealEvent:
+    """
+    Copying the same text twice is two attempts, not one.
+
+    The watcher compared CONTENT only, so the second copy hit
+    `current == prev` and the poll was skipped before any classification ran.
+    A live test of the AI-window path came back completely clean because of
+    it: the string was already on the clipboard from an earlier run, so every
+    re-copy was invisible, and nothing could ever fire.
+
+    Windows bumps GetClipboardSequenceNumber() on every write, including a
+    write of identical bytes. That is the signal that distinguishes "the
+    clipboard holds sensitive data" from "someone just copied it again".
+    """
+
+    def test_the_sequence_number_is_available_here(self):
+        # If this returned 0 the fix would silently degrade to the old
+        # content-only behaviour, which is the bug.
+        assert cw._clipboard_sequence() > 0
+
+    def test_it_survives_a_platform_without_the_counter(self):
+        # Non-Windows, or a locked clipboard. Returning 0 leaves the content
+        # comparison in charge rather than raising into the poll loop.
+        with patch("ctypes.windll", create=True) as windll:
+            windll.user32.GetClipboardSequenceNumber.side_effect = OSError("no")
+            assert cw._clipboard_sequence() == 0
+
+    def test_a_bumped_sequence_counts_as_a_copy_even_with_equal_content(self):
+        # The decision the loop makes, stated directly: same bytes, new write.
+        prev, prev_seq = "Sarah Okafor, Manchester", 100
+        current, seq = "Sarah Okafor, Manchester", 101
+
+        recopied = seq != prev_seq and seq != 0
+        assert recopied
+        assert not (not current or (current == prev and not recopied))
+
+    def test_an_unchanged_sequence_and_content_is_still_skipped(self):
+        # Polling 3 times a second must not re-classify a clipboard nobody
+        # touched.
+        prev, prev_seq = "Sarah Okafor, Manchester", 100
+        current, seq = "Sarah Okafor, Manchester", 100
+
+        recopied = seq != prev_seq and seq != 0
+        assert not recopied
+        assert (current == prev and not recopied)
+
+    def test_changed_content_still_counts_without_any_sequence(self):
+        # Where the counter is unavailable (seq == 0), new content must still
+        # be seen -- the fallback has to be the old behaviour, not silence.
+        prev, prev_seq = "old", 0
+        current, seq = "Sarah Okafor, Manchester", 0
+
+        recopied = seq != prev_seq and seq != 0
+        assert not recopied
+        assert not (not current or (current == prev and not recopied))

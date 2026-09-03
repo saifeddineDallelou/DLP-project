@@ -62,6 +62,31 @@ def _offer_incident_review_request(client: DLPApiClient, incident_id: str, label
     threading.Thread(target=_run, daemon=True, name="review-prompt").start()
 
 
+def _clipboard_sequence() -> int:
+    """Windows' clipboard change counter, or 0 where it is unavailable.
+
+    Every write to the clipboard bumps this, even a write of identical bytes.
+    That is the difference between "the clipboard holds sensitive data" and
+    "someone just copied sensitive data again" -- and for a DLP tool the
+    second is a fresh attempt, not a non-event.
+
+    Comparing CONTENT alone missed it entirely: copy the same text a second
+    time and the watcher saw `current == prev` and skipped the poll, so no
+    classification ran and no block could fire. A live test of the AI-window
+    path came back clean for exactly this reason -- the string was already on
+    the clipboard from an earlier run, and every re-copy after that was
+    invisible.
+
+    Returns 0 on failure, which reads as "no sequence information" and leaves
+    the content comparison in charge, exactly as before.
+    """
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
+
+
 def _check_restricted_app(
     client: DLPApiClient,
     agent_id: str,
@@ -272,6 +297,7 @@ def _clipboard_loop(
     app_rule_resolver=None,
 ) -> None:
     prev        = ""
+    prev_seq    = _clipboard_sequence()
     prev_files: tuple[str, ...] = ()
     poll_num    = 0
     error_count = 0
@@ -284,7 +310,7 @@ def _clipboard_loop(
         if poll_num % _LOG_ALIVE_EVERY == 0:
             logger.debug(
                 f"[CLIPBOARD] Alive | poll=#{poll_num} | "
-                f"errors={error_count} | prev_len={len(prev)}"
+                f"errors={error_count} | prev_len={len(prev or '')} | seq={prev_seq}"
             )
 
         # ── Copied FILE (CF_HDROP) — Ctrl+C on a file in Explorer ────────────
@@ -307,19 +333,30 @@ def _clipboard_loop(
             stop.wait(_POLL_INTERVAL)
             continue
 
-        if not current or current == prev:
+        # A COPY happened if either the bytes changed or the clipboard was
+        # written again. Content alone is not enough: copying the same text
+        # twice is two attempts, and the second one used to be skipped here
+        # without ever reaching the classifier.
+        seq = _clipboard_sequence()
+        recopied = seq != prev_seq and seq != 0
+        if not current or (current == prev and not recopied):
+            prev_seq = seq
             stop.wait(_POLL_INTERVAL)
             continue
 
         # Skip our own block messages to avoid a classification round-trip
         if current.startswith(_DLP_BLOCK_MSG[:20]):
             prev = current
+            prev_seq = seq
             stop.wait(_POLL_INTERVAL)
             continue
 
         # Clipboard changed — record the detection time before the (slow) classify call
         t_change = time.monotonic()
         prev = current
+        prev_seq = seq
+        if recopied and current == prev:
+            logger.info("[CLIPBOARD] Same content copied again -- re-checking")
 
         content_len = len(current.strip())
         logger.info(
