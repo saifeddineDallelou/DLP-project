@@ -223,6 +223,27 @@ def _classify_paths(client: DLPApiClient, paths: list[str]) -> dict | None:
     return worst
 
 
+def _platform_from_browser(target_title: str) -> str | None:
+    """The AI platform the browser says is active, if the drop target is one.
+
+    Only trusted when the drop target actually IS a browser window: the
+    extension reports the active tab of the last focused browser, which says
+    nothing about a drop onto Notepad.
+    """
+    try:
+        import browser_sensor
+        from ai_domain_monitor import _is_browser_window
+        if not _is_browser_window(target_title):
+            return None
+        platform, _detail = browser_sensor.STATE.current()
+        return platform
+    except Exception:
+        # A missing extension, or a sensor that cannot answer, must never
+        # raise into the drag loop -- that would take down the monitor for
+        # every later drag, not just this one.
+        return None
+
+
 def _drag_loop(
     client: DLPApiClient,
     agent_id: str,
@@ -301,7 +322,24 @@ def _drag_loop(
             stop.wait(_POLL_INTERVAL)
             continue
 
-        platform = ai_platform_for(_window_text(target))
+        target_title = _window_text(target)
+        platform = ai_platform_for(target_title)
+
+        if not platform:
+            # The title said nothing -- ask the browser itself.
+            #
+            # A browser puts every tab in one window, and ChatGPT renames its
+            # tab to the conversation topic as soon as you start chatting, so
+            # the title stops naming the platform exactly when it starts
+            # mattering. The extension reports the active tab's hostname,
+            # which a title cannot be made to reveal.
+            #
+            # This monitor was never wired to it: a live test dragged a file
+            # of card numbers onto a renamed ChatGPT tab, the agent detected
+            # and classified the file at risk 1.00, and then let the drop
+            # through because the window was called something else.
+            platform = _platform_from_browser(target_title)
+
         if not platform:
             stop.wait(_POLL_INTERVAL)
             continue

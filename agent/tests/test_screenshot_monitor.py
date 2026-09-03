@@ -1,3 +1,4 @@
+import pathlib
 import queue
 import threading
 import time
@@ -187,3 +188,86 @@ class TestStartScreenshotMonitor:
             t = screenshot_monitor.start_screenshot_monitor(MagicMock(), "agent-1", stop, resolver)
         assert isinstance(t, threading.Thread)
         resolver.resolve.assert_not_called()
+
+
+class TestTitleHeuristicDoesNotKillTheThread:
+    """
+    Regression: the title-heuristic path referenced an undefined `risk_score`.
+
+    It raised a NameError inside the screenshot thread, so the thread died on
+    the FIRST capture and every screenshot after that was unmonitored -- with
+    nothing in the log but a traceback nobody was watching for. A live test
+    reported "the screenshot didn't work". It had worked exactly once, by
+    dying.
+    """
+
+    def test_a_sensitive_title_capture_leaves_the_loop_running(self):
+        client = MagicMock()
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "BLOCK", "name": "Internal"}
+        stop = threading.Event()
+
+        images = [True, True, False]
+        seqs = iter(range(1, 40))
+
+        def _has_image():
+            return images.pop(0) if images else False
+
+        def _seq():
+            return next(seqs, 99)
+
+        with patch("screenshot_monitor._get_foreground_title", return_value="Payroll - Confidential"),              patch("screenshot_monitor._clipboard_has_image", side_effect=_has_image),              patch("screenshot_monitor._clipboard_seq", side_effect=_seq),              patch("screenshot_monitor._OCR_AVAILABLE", False),              patch("screenshot_monitor.pyperclip.copy"):
+            t = threading.Thread(
+                target=screenshot_monitor._screenshot_loop,
+                args=(client, "agent-1", "user-1", stop, resolver),
+                daemon=True,
+            )
+            t.start()
+            time.sleep(1.0)
+            still_running = t.is_alive()
+            stop.set()
+            t.join(timeout=3)
+
+        # The whole point: the thread survived the capture.
+        assert still_running
+        assert resolver.resolve.called
+        assert resolver.resolve.call_args.kwargs["risk_score"] ==             screenshot_monitor._TITLE_HEURISTIC_RISK
+
+    def test_a_policy_below_every_rung_does_not_end_monitoring(self):
+        # `return None` here used to exit the whole loop, so one screenshot
+        # falling below a policy's lowest rung permanently ended screenshot
+        # monitoring for the session -- silently, because nothing logs a
+        # thread that simply stops.
+        client = MagicMock()
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "NONE", "name": "Laddered"}
+        stop = threading.Event()
+
+        images = [True, True, True, False]
+        seqs = iter(range(1, 40))
+
+        with patch("screenshot_monitor._get_foreground_title", return_value="Payroll - Confidential"),              patch("screenshot_monitor._clipboard_has_image",
+                   side_effect=lambda: images.pop(0) if images else False),              patch("screenshot_monitor._clipboard_seq", side_effect=lambda: next(seqs, 99)),              patch("screenshot_monitor._OCR_AVAILABLE", False),              patch("screenshot_monitor.pyperclip.copy"):
+            t = threading.Thread(
+                target=screenshot_monitor._screenshot_loop,
+                args=(client, "agent-1", "user-1", stop, resolver),
+                daemon=True,
+            )
+            t.start()
+            time.sleep(1.0)
+            still_running = t.is_alive()
+            stop.set()
+            t.join(timeout=3)
+
+        assert still_running
+
+    def test_the_confidence_is_a_real_value(self):
+        assert 0.0 < screenshot_monitor._TITLE_HEURISTIC_RISK <= 1.0
+
+    def test_the_incident_and_the_lookup_share_one_number(self):
+        # They were two separate literals. Drift between them would mean an
+        # incident reporting a confidence the policy was never resolved at.
+        source = pathlib.Path(screenshot_monitor.__file__).read_text(encoding="utf-8")
+        assert "risk_score=0.75," not in source
+        assert "_TITLE_HEURISTIC_RISK" in source
+

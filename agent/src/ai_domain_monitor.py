@@ -250,6 +250,38 @@ def _get_foreground_title() -> str:
     return _get_foreground_window()[1]
 
 
+def _get_foreground_process() -> str:
+    """The executable name of the foreground window's process, lower-cased.
+
+    A window TITLE describes what an app is currently showing; the process
+    name is what the app IS. For a restricted-app rule those are not
+    interchangeable, and assuming they were made the rules unmatchable:
+    7-Zip titles its window after the folder being browsed
+    ("C:\\Users\\MMD\\Downloads\\"), which contains no "7z" anywhere, so the
+    obvious keyword to type into the dashboard could never fire.
+
+    Returns "" when the process cannot be identified -- callers fall back to
+    the title, which is still better than nothing for an app whose executable
+    name says little.
+    """
+    hwnd = _get_foreground_window()[0]
+    if not hwnd:
+        return ""
+    try:
+        import ctypes
+        import psutil
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        return (psutil.Process(pid.value).name() or "").lower()
+    except Exception:
+        # A process that exited between the two calls, an access denial on a
+        # higher-integrity window, or a platform without psutil. None of those
+        # is worth failing a clipboard check over.
+        return ""
+
+
 def _detect_platform_in_text(text: str) -> str | None:
     lower = text.lower()
     for keyword, plat in _WINDOW_KEYWORDS:
@@ -883,6 +915,8 @@ def _ai_monitor_loop(
     state: AgentState,
     stop: threading.Event,
     blocker: AiBlocker,
+    client: DLPApiClient | None = None,
+    app_rule_resolver=None,
 ) -> None:
     poll_num = 0
 
@@ -923,6 +957,36 @@ def _ai_monitor_loop(
                     f"[AI-MONITOR] Delayed {action_taken.lower()} applied "
                     f"({(time.monotonic() - t_flagged)*1000:.0f} ms after copy)"
                 )
+            elif client is not None and app_rule_resolver is not None:
+                # No AI platform -- but a RESTRICTED APP may have come to the
+                # foreground since the copy.
+                #
+                # This check used to run only at the instant of copying, so
+                # the ordinary sequence "copy the data, then open the app you
+                # are about to paste it into" was never caught: at copy time
+                # the app was not in front yet, and nothing ever looked again.
+                # The AI path has had a delayed re-check since a live test
+                # found the same hole there; this is that fix for the other
+                # risky destination.
+                #
+                # Imported here rather than at module scope: clipboard_watcher
+                # imports from this module, and a top-level import would make
+                # that circular.
+                from clipboard_watcher import _check_restricted_app
+                restricted = _check_restricted_app(
+                    client, agent_id, app_rule_resolver, blocker._policy_resolver,
+                    ctx.get("detections") or [], ctx.get("risk_score") or 0.95,
+                )
+                if restricted:
+                    logger.info(
+                        f"[AI-MONITOR] Delayed {restricted.lower()} applied for a "
+                        f"restricted app ({(time.monotonic() - t_flagged)*1000:.0f} ms after copy)"
+                    )
+                    # Handled. Without clearing the flag the watch stays live
+                    # for the rest of its window and this fires on every poll
+                    # -- one copy near a restricted app would write a row per
+                    # second.
+                    state.clear_sensitive_clipboard()
 
         elapsed   = time.monotonic() - t0
         stop.wait(max(0.0, _POLL_INTERVAL - elapsed))
@@ -936,6 +1000,7 @@ def start_ai_domain_monitor(
     state: AgentState,
     stop: threading.Event,
     policy_resolver=None,
+    app_rule_resolver=None,
 ) -> tuple[threading.Thread, "AiBlocker"]:
     """
     Start the AI domain monitor background thread.
@@ -952,7 +1017,7 @@ def start_ai_domain_monitor(
 
     t = threading.Thread(
         target=_ai_monitor_loop,
-        args=(agent_id, state, stop, blocker),
+        args=(agent_id, state, stop, blocker, client, app_rule_resolver),
         daemon=True,
         name="ai-domain-monitor",
     )

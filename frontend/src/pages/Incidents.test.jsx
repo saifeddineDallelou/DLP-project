@@ -155,3 +155,30 @@ describe('Incidents page', () => {
   });
 
 });
+
+describe('which file, which content', () => {
+  // "Something sensitive happened on the FILE channel" is not actionable.
+  // Evidence is stored as Bytes and used to serialise as a Buffer blob, so
+  // no page could display it and the question had no answer anywhere.
+
+  test('the table names what was found', async () => {
+    mockIncidents([incident({ channel: 'FILE', evidence: 'customers-export.csv' })]);
+    render(<Incidents />);
+    expect(await screen.findByText('customers-export.csv')).toBeInTheDocument();
+  });
+
+  test('a long value is kept readable rather than breaking the row', async () => {
+    const long = 'C:/Users/MMD/Documents/dlp-watch/' + 'a'.repeat(200) + '.csv';
+    mockIncidents([incident({ channel: 'FILE', evidence: long })]);
+    render(<Incidents />);
+    const cell = await screen.findByTitle(long);
+    expect(cell.className).toMatch(/truncate/);
+  });
+
+  test('an incident with no evidence shows a dash, not blank', async () => {
+    mockIncidents([incident({ evidence: null })]);
+    render(<Incidents />);
+    await screen.findByRole('table');
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+});

@@ -40,6 +40,18 @@ class AgentState:
                 "content_sample": content_sample,
             }
 
+    def clear_sensitive_clipboard(self) -> None:
+        """The flagged clipboard has been dealt with -- stop watching it.
+
+        Without this the deferred watch keeps firing every poll for the rest
+        of its window: clearing the clipboard does nothing to the flag that
+        says "keep looking", so one copy near a restricted app would write an
+        incident per second.
+        """
+        with self._lock:
+            self._last_sensitive_clip = 0.0
+            self._sensitive_clip_context = {}
+
     def increment_file_access(self, size_bytes: int = 0) -> None:
         with self._lock:
             self.file_access_count += 1
@@ -55,6 +67,8 @@ class AgentState:
 
     def clipboard_flagged_recently(self, within_seconds: float = 30.0) -> bool:
         with self._lock:
+            if not self._last_sensitive_clip:
+                return False       # never flagged, or already dealt with
             return (time.monotonic() - self._last_sensitive_clip) < within_seconds
 
     def sensitive_clip_monotonic(self) -> float:

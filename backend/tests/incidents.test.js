@@ -315,3 +315,69 @@ describe('a permitted match is auditable, not actionable', () => {
     expect(res.body.status).toBe('OPEN');
   });
 });
+
+describe('evidence is readable', () => {
+  // Stored as Bytes, so it serialised as {"type":"Buffer","data":[...]} --
+  // unreadable in a dashboard, which is why no page displayed it and "which
+  // file was this?" had no answer anywhere in the product.
+
+  test('the list returns evidence as text', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({
+        agentId: agent.id, policyId: policy.id, severity: 'HIGH',
+        channel: 'FILE', evidence: 'customers-export.csv',
+      });
+
+    const { user } = await createUser();
+    const res = await request(app).get('/api/incidents')
+      .set('Authorization', authHeader(user));
+
+    expect(res.status).toBe(200);
+    expect(res.body.incidents[0].evidence).toBe('customers-export.csv');
+  });
+
+  test('creating one returns it as text too', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({
+        agentId: agent.id, policyId: policy.id, severity: 'HIGH',
+        channel: 'FILE', evidence: 'payroll.xlsx [QUARANTINED -> C:/q/payroll.xlsx]',
+      });
+
+    expect(res.body.evidence).toBe('payroll.xlsx [QUARANTINED -> C:/q/payroll.xlsx]');
+  });
+
+  test('an incident with no evidence returns null, not an empty buffer', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({ agentId: agent.id, policyId: policy.id, severity: 'LOW', channel: 'CLIPBOARD' });
+
+    expect(res.body.evidence).toBeNull();
+  });
+
+  test('non-UTF8 bytes do not blow up the list', async () => {
+    // Captured content is arbitrary. One malformed row must not 500 the page.
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    await prisma.incident.create({
+      data: {
+        agentId: agent.id, policyId: policy.id, severity: 'LOW', channel: 'FILE',
+        evidence: Buffer.from([0xff, 0xfe, 0x00, 0x41]),
+      },
+    });
+
+    const { user } = await createUser();
+    const res = await request(app).get('/api/incidents')
+      .set('Authorization', authHeader(user));
+
+    expect(res.status).toBe(200);
+    expect(typeof res.body.incidents[0].evidence).toBe('string');
+  });
+});

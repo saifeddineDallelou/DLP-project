@@ -339,3 +339,43 @@ class TestPlatformGuard:
             s.platform = "linux"
             t = ddm.start_drag_drop_monitor(MagicMock(), "agent-1", threading.Event())
         assert not t.is_alive() or True   # a no-op thread, never the real loop
+
+
+class TestDropTargetAsksTheBrowser:
+    """
+    A browser puts every tab in one window, and ChatGPT renames its tab to the
+    conversation topic as soon as you start chatting -- so the window title
+    stops naming the platform exactly when it starts mattering.
+
+    This monitor matched the drop target by title alone. A live test dragged a
+    file of card numbers onto a renamed ChatGPT tab: the agent saw the drag,
+    classified the file at risk 1.00, and then let the drop through because
+    the window was called something else. The extension knew the hostname the
+    whole time; nothing asked it.
+    """
+
+    def test_a_renamed_browser_tab_is_still_recognised(self):
+        with patch("ai_domain_monitor._is_browser_window", return_value=True), \
+             patch("browser_sensor.STATE") as state:
+            state.current.return_value = ("OPENAI_CHATGPT", "chatgpt.com")
+            assert ddm._platform_from_browser("Sarah Okafor - Opera") == "OPENAI_CHATGPT"
+
+    def test_a_non_browser_target_is_never_matched_from_the_browser(self):
+        # The extension reports the active tab of the last focused browser,
+        # which says nothing about a drop onto Notepad.
+        with patch("ai_domain_monitor._is_browser_window", return_value=False), \
+             patch("browser_sensor.STATE") as state:
+            state.current.return_value = ("OPENAI_CHATGPT", "chatgpt.com")
+            assert ddm._platform_from_browser("Untitled - Notepad") is None
+
+    def test_a_browser_with_no_ai_tab_is_not_a_match(self):
+        with patch("ai_domain_monitor._is_browser_window", return_value=True), \
+             patch("browser_sensor.STATE") as state:
+            state.current.return_value = (None, "")
+            assert ddm._platform_from_browser("News - Opera") is None
+
+    def test_it_survives_the_sensor_being_unavailable(self):
+        # A missing extension must not raise into the drag loop.
+        with patch("ai_domain_monitor._is_browser_window", side_effect=ImportError):
+            assert ddm._platform_from_browser("anything") is None
+

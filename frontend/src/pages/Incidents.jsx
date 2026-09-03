@@ -122,6 +122,7 @@ export default function Incidents() {
             <tr className="border-b border-border bg-surface-elevated/50">
               <th className="th">Severity</th>
               <th className="th">Channel</th>
+              <th className="th">What was found</th>
               <th className="th">Status</th>
               <th className="th">Risk</th>
               <th className="th">Agent</th>
@@ -131,9 +132,9 @@ export default function Incidents() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="text-center py-16"><Spinner /></td></tr>
+              <tr><td colSpan={8} className="text-center py-16"><Spinner /></td></tr>
             ) : incidents.length === 0 ? (
-              <tr><td colSpan={7}><EmptyState title="No incidents found" /></td></tr>
+              <tr><td colSpan={8}><EmptyState title="No incidents found" /></td></tr>
             ) : incidents.map((inc) => {
               const ChanIcon = CHANNEL_ICON[inc.channel] ?? File;
               return (
@@ -144,6 +145,14 @@ export default function Incidents() {
                       <ChanIcon size={13} />
                       <span className="text-xs">{inc.channel}</span>
                     </div>
+                  </td>
+                  <td className="td max-w-[22rem]">
+                    {/* The filename, or the masked snippet the classifier
+                        matched. Without it a row says something sensitive
+                        happened somewhere and leaves you to guess where. */}
+                    <span className="text-xs text-ink-soft truncate block" title={inc.evidence || ''}>
+                      {inc.evidence || <span className="text-ink-faint">—</span>}
+                    </span>
                   </td>
                   <td className="td">
                     <div className="flex items-center gap-1.5">

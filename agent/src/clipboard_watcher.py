@@ -21,7 +21,8 @@ from loguru import logger
 
 from api_client      import DLPApiClient
 from agent_state     import AgentState
-from ai_domain_monitor import AiBlocker, _get_foreground_title, _DLP_BLOCK_MSG
+from ai_domain_monitor import (AiBlocker, _get_foreground_title,
+                               _get_foreground_process, _DLP_BLOCK_MSG)
 from evidence        import safe_sample
 from file_extractor  import extract
 from file_watcher    import severity_for
@@ -87,6 +88,27 @@ def _clipboard_sequence() -> int:
         return 0
 
 
+def _match_foreground_app(app_rule_resolver) -> str | None:
+    """Is a restricted app in front of the user right now?
+
+    Checks the PROCESS NAME first, then the window title.
+
+    Title-only matching is what this used to do, and it made correct-looking
+    rules unmatchable: 7-Zip titles its window after the folder being browsed
+    ("C:\\Users\\MMD\\Downloads\\"), so the keyword "7z" -- the obvious thing
+    to type into the dashboard -- could never match, and a live test of the
+    restricted-app path came back clean with the app in the foreground.
+
+    The title is still checked second: some apps have an uninformative
+    executable name but say what they are in the title bar, and an admin who
+    wrote a rule against either one should get a match.
+    """
+    if not app_rule_resolver:
+        return None
+    return (app_rule_resolver.match(_get_foreground_process())
+            or app_rule_resolver.match(_get_foreground_title()))
+
+
 def _check_restricted_app(
     client: DLPApiClient,
     agent_id: str,
@@ -109,7 +131,7 @@ def _check_restricted_app(
 
     Returns the resolved action, or None if no restricted app is active.
     """
-    label = app_rule_resolver.match(_get_foreground_title()) if app_rule_resolver else None
+    label = _match_foreground_app(app_rule_resolver)
     if not label:
         return None
 

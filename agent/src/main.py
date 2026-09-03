@@ -199,7 +199,9 @@ def main() -> None:
     logger.info("[2/10] File watcher started")
 
     # ── 4. AI domain monitor (creates AiBlocker shared with clipboard watcher) ──
-    _ai_thread, blocker = start_ai_domain_monitor(client, agent_id or "", shared, stop, policy_resolver)
+    _ai_thread, blocker = start_ai_domain_monitor(
+        client, agent_id or "", shared, stop, policy_resolver, app_rule_resolver,
+    )
     logger.info("[4/10] AI domain monitor started")
 
     # ── 3. Clipboard watcher (receives blocker for immediate check-and-block) ──

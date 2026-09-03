@@ -5,6 +5,23 @@ const { toEvent, forwardAsync } = require('../lib/siem');
 
 const router = express.Router();
 
+// Evidence is stored as Bytes, so it serialises to JSON as
+// {"type":"Buffer","data":[...]} -- unreadable in a dashboard, which is why
+// no page ever displayed it and "which file was this?" had no answer.
+//
+// Decoded to text on the way out. Bytes rather than String is still right in
+// the database: this is captured content, and the column should not carry an
+// encoding promise the agent cannot keep. Replacement characters are
+// preferable to a 500 on one malformed row.
+function withReadableEvidence(incident) {
+  if (!incident) return incident;
+  const { evidence, ...rest } = incident;
+  return {
+    ...rest,
+    evidence: evidence ? Buffer.from(evidence).toString('utf8') : null,
+  };
+}
+
 // POST /api/incidents  (accepts JWT Bearer OR x-agent-token)
 router.post('/', async (req, res, next) => {
   try {
@@ -71,7 +88,7 @@ router.post('/', async (req, res, next) => {
       raw: { evidenceType: incident.evidenceType, status: incident.status },
     }));
 
-    res.status(201).json(incident);
+    res.status(201).json(withReadableEvidence(incident));
   } catch (err) {
     if (err.code === 'P2003') return res.status(400).json({ error: 'Invalid agentId or policyId' });
     next(err);
@@ -105,7 +122,10 @@ router.get('/', authenticate, async (req, res, next) => {
       prisma.incident.count({ where }),
     ]);
 
-    res.json({ incidents, total, page: Number(page), limit: take });
+    res.json({
+      incidents: incidents.map(withReadableEvidence),
+      total, page: Number(page), limit: take,
+    });
   } catch (err) {
     next(err);
   }
@@ -123,7 +143,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
       },
     });
     if (!incident) return res.status(404).json({ error: 'Incident not found' });
-    res.json(incident);
+    res.json(withReadableEvidence(incident));
   } catch (err) {
     next(err);
   }

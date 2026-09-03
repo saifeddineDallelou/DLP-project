@@ -32,6 +32,14 @@ from loguru import logger
 from api_client import DLPApiClient
 from policy_resolver import PolicyResolver, DEFAULT_POLICY_ID
 
+# Confidence for the TITLE-HEURISTIC path, which never calls the classifier:
+# a sensitive-looking window title is real evidence but weaker than a content
+# match. Used for the policy lookup and for the incident, which already
+# reported 0.75 -- the lookup referenced an undefined `risk_score` instead,
+# and the NameError killed the entire screenshot thread on the first capture.
+# Every screenshot after that was unmonitored, silently.
+_TITLE_HEURISTIC_RISK = 0.75
+
 _POLICY_ID      = DEFAULT_POLICY_ID  # fallback when no PolicyResolver is supplied
 _COOLDOWN_SECS  = 5.0    # min seconds between reactions (debounce rapid presses)
 _CHECK_INTERVAL = 0.2    # seconds between clipboard-image polls / queue drains
@@ -278,7 +286,8 @@ def _screenshot_loop(
                 "confidence": 0.6,
             }]
             policy = (
-                policy_resolver.resolve(detections, channel="SCREENSHOT", risk_score=risk_score)
+                policy_resolver.resolve(detections, channel="SCREENSHOT",
+                                        risk_score=_TITLE_HEURISTIC_RISK)
                 if policy_resolver
                 else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
             )
@@ -380,8 +389,14 @@ def _screenshot_loop(
             # Below every rung of the policy's risk ladder: this confidence is
             # not covered at all. Distinct from ALLOW, which is a decision to
             # permit and is recorded for audit -- NONE has nothing to record.
+            #
+            # `continue`, not `return`: this skips ONE queued event. Returning
+            # exited the whole loop, so a single screenshot that happened to
+            # fall below a policy's lowest rung permanently ended screenshot
+            # monitoring for the rest of the session -- silently, since
+            # nothing logs a thread that simply stops.
             if action == "NONE":
-                return None
+                continue
 
             if action == "ALLOW":
                 logger.debug(
@@ -432,7 +447,7 @@ def _screenshot_loop(
                 severity="HIGH",
                 channel="SCREENSHOT",
                 evidence=title[:255],
-                risk_score=0.75,
+                risk_score=_TITLE_HEURISTIC_RISK,
             )
             if incident:
                 logger.success(

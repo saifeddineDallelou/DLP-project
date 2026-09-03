@@ -48,8 +48,10 @@ from loguru import logger
 from pywinauto import Desktop
 
 from api_client import DLPApiClient
+import browser_sensor
 from ai_domain_monitor import (
     _detect_platform_in_text,
+    _is_browser_window,
     _enum_all_windows,
     _enum_all_window_titles,
     _is_browser_window,
@@ -191,6 +193,16 @@ def _active_ai_platform() -> str | None:
         platform = _detect_platform_in_text(title)
         if platform:
             return platform
+
+        # The extension knows what the title cannot say: which tab is active
+        # inside a browser window that has been renamed by the page. Asked
+        # before the address-bar scan below because it is both cheaper and
+        # more reliable -- no UI Automation, no lazily-built accessibility
+        # tree that some browsers never populate.
+        if _is_browser_window(title):
+            sensor_platform, _detail = browser_sensor.STATE.current()
+            if sensor_platform:
+                return sensor_platform
 
     now = time.monotonic()
     if now - _platform_url_cache_time > _PLATFORM_CACHE_TTL:
