@@ -1,6 +1,6 @@
 import threading
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 import pytest
 
@@ -131,7 +131,8 @@ class TestAiBlocker:
 
         # The channel decides which response is even possible: a file at
         # rest cannot be blocked in flight, a paste cannot be quarantined.
-        resolver.resolve.assert_called_once_with(detections, channel="CLIPBOARD")
+        resolver.resolve.assert_called_once_with(
+            detections, channel="CLIPBOARD", risk_score=ANY)
 
     def test_clipboard_is_cleared_every_time_not_just_once_per_cooldown(self):
         """Regression: the clear used to be gated behind _CLIP_CLEAR_COOLDOWN.

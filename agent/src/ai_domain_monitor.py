@@ -608,11 +608,17 @@ class AiBlocker:
             return None
 
         policy = (
-            self._policy_resolver.resolve(detections or [], channel="CLIPBOARD")
+            self._policy_resolver.resolve(detections or [], channel="CLIPBOARD", risk_score=risk_score)
             if self._policy_resolver
             else {"id": None, "action": "BLOCK", "name": None}
         )
         action = policy["action"]
+
+        # Below every rung of the policy's risk ladder: this confidence is
+        # not covered at all. Distinct from ALLOW, which is a decision to
+        # permit and is recorded for audit -- NONE has nothing to record.
+        if action == "NONE":
+            return None
 
         if action == "ALLOW":
             logger.debug(

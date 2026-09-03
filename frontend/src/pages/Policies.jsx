@@ -13,7 +13,7 @@ import { formatDate } from '../utils/format.js';
 
 const EMPTY_FORM = {
   name: '', description: '', conditions: { patterns: [], threshold: 1 },
-  action: 'ALERT', severity: 'MEDIUM', enabled: true, channelActions: {},
+  action: 'ALERT', severity: 'MEDIUM', enabled: true, channelActions: {}, tiers: [],
 };
 
 // Which responses a channel can actually carry out.
@@ -70,6 +70,7 @@ export default function Policies() {
       severity: p.severity,
       enabled: p.enabled,
       channelActions: p.channelActions ?? {},
+      tiers: p.tiers ?? [],
     });
     setFormError('');
     setEditTarget(p);
@@ -85,6 +86,7 @@ export default function Policies() {
         name: form.name, description: form.description || undefined,
         conditions: form.conditions, action: form.action, severity: form.severity, enabled: form.enabled,
         channelActions: form.channelActions,
+        tiers: form.tiers,
       };
       if (editTarget?.id) {
         await api.put(`/api/policies/${editTarget.id}`, payload);
@@ -225,6 +227,89 @@ export default function Policies() {
                 {['LOW','MEDIUM','HIGH','CRITICAL'].map(s => <option key={s}>{s}</option>)}
               </select>
             </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="label mb-1">Graduated response</p>
+            <p className="text-xs text-ink-faint mb-3">
+              Higher detection confidence, stronger response. Without a ladder the
+              action and severity are fixed regardless of how sure the classifier
+              was — which is how an incident ends up reading
+              <span className="font-mono"> risk 0.93</span>,
+              <span className="font-mono"> CRITICAL</span>,
+              <span className="font-mono"> ALLOW</span> all at once. Content below the
+              lowest rung produces nothing at all.
+            </p>
+
+            {form.tiers.length === 0 ? (
+              <button
+                type="button"
+                className="btn-ghost text-xs"
+                onClick={() => setForm(f => ({ ...f, tiers: [
+                  { minRisk: 0.9, action: 'QUARANTINE', severity: 'CRITICAL' },
+                  { minRisk: 0.7, action: 'ALERT', severity: 'HIGH' },
+                ] }))}
+              >
+                + Use a risk ladder
+              </button>
+            ) : (
+              <div className="space-y-2">
+                {[...form.tiers]
+                  .sort((a, b) => Number(b.minRisk) - Number(a.minRisk))
+                  .map((tier, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="text-[11px] text-ink-faint w-14 shrink-0">risk ≥</span>
+                    <input
+                      type="number" step="0.05" min="0" max="1"
+                      aria-label={`Tier ${i + 1} threshold`}
+                      className="input w-20 shrink-0"
+                      value={tier.minRisk}
+                      onChange={e => setForm(f => {
+                        const t = [...f.tiers]; t[i] = { ...t[i], minRisk: Number(e.target.value) };
+                        return { ...f, tiers: t };
+                      })}
+                    />
+                    <select
+                      aria-label={`Tier ${i + 1} action`}
+                      className="select flex-1"
+                      value={tier.action}
+                      onChange={e => setForm(f => {
+                        const t = [...f.tiers]; t[i] = { ...t[i], action: e.target.value };
+                        return { ...f, tiers: t };
+                      })}
+                    >
+                      {['ALLOW','ALERT','BLOCK','QUARANTINE'].map(a => <option key={a}>{a}</option>)}
+                    </select>
+                    <select
+                      aria-label={`Tier ${i + 1} severity`}
+                      className="select w-32 shrink-0"
+                      value={tier.severity ?? ''}
+                      onChange={e => setForm(f => {
+                        const t = [...f.tiers]; t[i] = { ...t[i], severity: e.target.value || null };
+                        return { ...f, tiers: t };
+                      })}
+                    >
+                      <option value="">Severity…</option>
+                      {['LOW','MEDIUM','HIGH','CRITICAL'].map(sv => <option key={sv}>{sv}</option>)}
+                    </select>
+                    <button
+                      type="button" aria-label={`Remove tier ${i + 1}`}
+                      className="btn-icon hover:text-severity-critical-text shrink-0"
+                      onClick={() => setForm(f => ({ ...f, tiers: f.tiers.filter((_, j) => j !== i) }))}
+                    >×</button>
+                  </div>
+                ))}
+                <button
+                  type="button" className="btn-ghost text-xs"
+                  onClick={() => setForm(f => ({ ...f, tiers: [...f.tiers, { minRisk: 0.5, action: 'ALERT', severity: 'MEDIUM' }] }))}
+                >+ Add a rung</button>
+                <p className="text-[11px] text-ink-faint">
+                  A ladder replaces the action and severity above. “Stop it” is carried
+                  out the way each channel can — cancelled in flight, or moved if the
+                  file is already at rest.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="border-t border-border pt-4">

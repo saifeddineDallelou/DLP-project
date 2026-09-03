@@ -8,11 +8,20 @@ import PageHeader from '../components/PageHeader.jsx';
 import Spinner from '../components/Spinner.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { formatDate, CHANNEL_ICON } from '../utils/format.js';
+import { formatDate, CHANNEL_ICON, ACTION_TONES } from '../utils/format.js';
 import { File } from 'lucide-react';
 
 const SEVERITIES = ['', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-const STATUSES   = ['', 'OPEN', 'IN_PROGRESS', 'RESOLVED', 'FALSE_POSITIVE'];
+const STATUSES   = ['', 'OPEN', 'IN_PROGRESS', 'RESOLVED', 'FALSE_POSITIVE', 'ALLOWED'];
+
+// What each response actually did, so the badge is readable without knowing
+// the product's vocabulary.
+const ACTION_HINTS = {
+  ALLOW:      'Permitted by policy — recorded so the exception can be audited',
+  ALERT:      'Recorded only. Nothing was stopped or moved.',
+  BLOCK:      'Stopped in flight — the paste, drag or upload never completed',
+  QUARANTINE: 'The file was moved out of the watched folder',
+};
 
 export default function Incidents() {
   const { user } = useAuth();
@@ -139,6 +148,19 @@ export default function Incidents() {
                   <td className="td">
                     <div className="flex items-center gap-1.5">
                       <Badge tone="status" value={inc.status} size="sm" />
+                      {/* What the agent DID. Without it an ALERT and a
+                          QUARANTINE are the same row -- an analyst cannot
+                          tell whether the file was moved or left where it
+                          was, and reading it off the policy is wrong the
+                          moment the policy is edited. */}
+                      {inc.actionTaken && (
+                        <span
+                          title={ACTION_HINTS[inc.actionTaken] ?? inc.actionTaken}
+                          className={`badge text-[9px] ${ACTION_TONES[inc.actionTaken]?.bg ?? 'bg-white/5'} ${ACTION_TONES[inc.actionTaken]?.text ?? 'text-ink-faint'}`}
+                        >
+                          {inc.actionTaken}
+                        </span>
+                      )}
                       {inc.reviewRequested && (
                         <span title="Worker flagged this for review" className="text-severity-medium-text">
                           <Flag size={12} />

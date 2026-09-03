@@ -145,4 +145,72 @@ describe('Policies page', () => {
     expect(api.post.mock.calls[0][1].channelActions).toEqual({});
   });
 
+
+  test('a policy has no ladder until one is asked for', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    expect(screen.getByRole('button', { name: /use a risk ladder/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/tier 1 action/i)).not.toBeInTheDocument();
+  });
+
+  test('the starting ladder escalates rather than flattening', async () => {
+    // A ladder that gets softer as confidence rises gives the strongest
+    // evidence the weakest response, so the default must not model that.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.click(screen.getByRole('button', { name: /use a risk ladder/i }));
+
+    expect(screen.getByLabelText(/tier 1 threshold/i)).toHaveValue(0.9);
+    expect(screen.getByLabelText(/tier 1 action/i)).toHaveValue('QUARANTINE');
+    expect(screen.getByLabelText(/tier 2 action/i)).toHaveValue('ALERT');
+  });
+
+  test('rungs are shown highest confidence first', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.click(screen.getByRole('button', { name: /use a risk ladder/i }));
+
+    const thresholds = [screen.getByLabelText(/tier 1 threshold/i).value,
+                       screen.getByLabelText(/tier 2 threshold/i).value].map(Number);
+    expect(thresholds[0]).toBeGreaterThan(thresholds[1]);
+  });
+
+  test('the ladder is sent with the policy', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    api.post.mockResolvedValue({ data: policy() });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.type(screen.getByLabelText(/^name/i), 'PII Detection');
+    await user.click(screen.getByRole('button', { name: /use a risk ladder/i }));
+    await user.click(screen.getByRole('button', { name: /create policy|save/i }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    const tiers = api.post.mock.calls[0][1].tiers;
+    expect(tiers).toHaveLength(2);
+    expect(tiers[0]).toMatchObject({ minRisk: 0.9, action: 'QUARANTINE' });
+  });
+
+  test('a rung can be removed', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.click(screen.getByRole('button', { name: /use a risk ladder/i }));
+    await user.click(screen.getByRole('button', { name: /remove tier 1/i }));
+
+    expect(screen.queryByLabelText(/tier 2 action/i)).not.toBeInTheDocument();
+  });
+
 });

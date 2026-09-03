@@ -208,7 +208,7 @@ def _content_check_async(
     )
 
     policy = (
-        policy_resolver.resolve(detections, channel="SCREENSHOT")
+        policy_resolver.resolve(detections, channel="SCREENSHOT", risk_score=risk_score)
         if policy_resolver
         else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
     )
@@ -278,7 +278,7 @@ def _screenshot_loop(
                 "confidence": 0.6,
             }]
             policy = (
-                policy_resolver.resolve(detections, channel="SCREENSHOT")
+                policy_resolver.resolve(detections, channel="SCREENSHOT", risk_score=risk_score)
                 if policy_resolver
                 else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
             )
@@ -377,6 +377,12 @@ def _screenshot_loop(
                 continue
 
             action = policy["action"]
+            # Below every rung of the policy's risk ladder: this confidence is
+            # not covered at all. Distinct from ALLOW, which is a decision to
+            # permit and is recorded for audit -- NONE has nothing to record.
+            if action == "NONE":
+                return None
+
             if action == "ALLOW":
                 logger.debug(
                     f"[SCREENSHOT] Sensitive window captured but policy "

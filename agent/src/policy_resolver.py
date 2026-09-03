@@ -25,6 +25,65 @@ DEFAULT_POLICY_ID = "seed-policy-pii-001"
 DEFAULT_ACTION     = "BLOCK"
 
 
+
+# Channels where the data is at REST. A file already sitting in a folder has
+# no in-flight action to intercept, so "stop it" can only mean moving it --
+# and conversely a paste cannot be moved to a quarantine folder. A ladder
+# expresses the INTENT to stop; each channel realises it with the action it
+# can actually perform.
+_AT_REST_CHANNELS = frozenset({"FILE"})
+_STOP_ACTIONS = frozenset({"BLOCK", "QUARANTINE"})
+
+_VALID_ACTIONS = frozenset({"ALLOW", "ALERT", "BLOCK", "QUARANTINE"})
+_VALID_SEVERITIES = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+
+def _clean_tiers(raw) -> list[dict]:
+    """Validate and sort a risk ladder, highest threshold first.
+
+    Anything malformed is dropped rather than trusted. These arrive from an
+    API and end up deciding what an endpoint agent does to a user's files, so
+    a tier with a non-numeric threshold or an action outside the enum must not
+    survive to be enforced.
+    """
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict] = []
+    for tier in raw:
+        if not isinstance(tier, dict):
+            continue
+        try:
+            min_risk = float(tier.get("minRisk"))
+        except (TypeError, ValueError):
+            continue
+        action = str(tier.get("action") or "").upper()
+        if action not in _VALID_ACTIONS:
+            continue
+        severity = str(tier.get("severity") or "").upper()
+        cleaned.append({
+            "minRisk": min_risk,
+            "action": action,
+            "severity": severity if severity in _VALID_SEVERITIES else None,
+        })
+    # Highest first, so the first match is the most severe that applies.
+    cleaned.sort(key=lambda t: t["minRisk"], reverse=True)
+    return cleaned
+
+
+def realise_for_channel(action: str, channel: str | None) -> str:
+    """The concrete action this channel can actually carry out.
+
+    A ladder says "stop this". Whether stopping means cancelling something in
+    flight or moving a file off disk depends entirely on where the data is,
+    and asking an admin to know that for every channel is how BLOCK on a file
+    at rest came to mean nothing at all.
+    """
+    if not channel or action not in _STOP_ACTIONS:
+        return action
+    at_rest = str(channel).upper() in _AT_REST_CHANNELS
+    return "QUARANTINE" if at_rest else "BLOCK"
+
+
 class PolicyResolver:
     def __init__(
         self,
@@ -57,6 +116,15 @@ class PolicyResolver:
                 "id": policy["id"],
                 "action": policy.get("action") or DEFAULT_ACTION,
                 "name": policy.get("name"),
+                # The admin's judgement of how much this matters. Carried so
+                # incidents can use it -- it was previously stored, displayed
+                # and read by nothing.
+                "severity": policy.get("severity"),
+                # Graduated response by detection confidence. Sorted high to
+                # low once here rather than on every lookup, and validated on
+                # the way in: a malformed tier must not become the action an
+                # endpoint enforces.
+                "tiers": _clean_tiers(policy.get("tiers")),
                 # Patterns are stored upper-cased with spaces normalized to
                 # underscores (e.g. "CREDIT CARD" -> "CREDIT_CARD") to match
                 # the classifier's detection `type`/keyword-`value` field --
@@ -89,7 +157,8 @@ class PolicyResolver:
             f"{list(mapping)}"
         )
 
-    def resolve(self, detections: list[dict], channel: str | None = None) -> dict:
+    def resolve(self, detections: list[dict], channel: str | None = None,
+                risk_score: float | None = None) -> dict:
         """
         Return {"id", "action", "name"} for the policy matching the first
         (highest-priority) detection whose compliance rule has a configured
@@ -122,22 +191,65 @@ class PolicyResolver:
                 chosen = candidate
                 break
 
-        return self._for_channel(chosen, channel)
+        return self._apply(chosen, channel, risk_score)
 
     @staticmethod
-    def _for_channel(policy: dict, channel: str | None) -> dict:
-        """The policy with `action` resolved for this channel.
+    def _apply(policy: dict, channel: str | None, risk_score: float | None) -> dict:
+        """Resolve a policy into the concrete response for this event.
 
-        A copy, never a mutation: the entries are shared cache state read from
-        several monitor threads, and rewriting `action` in place would leak
-        one channel's response into another's.
+        Order matters, and it is the order of who decided:
+
+        1. The RISK LADDER, when the policy has one and a risk score is known.
+           The detector's confidence chooses the tier, and the tier carries
+           both the action and the severity -- so those two can no longer
+           disagree with the score or with each other. Content below the
+           lowest tier produces nothing: `action` is NONE and callers skip it.
+        2. Otherwise the per-CHANNEL override, then the policy's flat action.
+        3. The action is then REALISED for the channel: a ladder says "stop
+           this", and whether that means cancelling something in flight or
+           moving a file off disk depends on where the data is.
+
+        A copy is always returned. The entries are shared cache state read
+        from several monitor threads, and rewriting them in place would leak
+        one event's resolution into the next.
         """
-        if not channel:
-            return policy
-        override = (policy.get("channelActions") or {}).get(str(channel).upper())
-        if not override or override == policy.get("action"):
-            return policy
-        return {**policy, "action": override, "actionSource": f"channel:{channel}"}
+        resolved = dict(policy)
+        source = None
+
+        tiers = policy.get("tiers") or []
+        if tiers and risk_score is not None:
+            tier = next((t for t in tiers if risk_score >= t["minRisk"]), None)
+            if tier is None:
+                # Below every rung. Not "allowed" -- simply not covered by
+                # this policy at this confidence, so nothing is recorded.
+                resolved["action"] = "NONE"
+                resolved["actionSource"] = "below-lowest-tier"
+                return resolved
+            # A tier says "stop this at this confidence"; the channel decides
+            # what stopping means. Translation is confined to this path on
+            # purpose: doing it for the flat `action` too would silently turn
+            # an existing BLOCK policy into one that MOVES people's files,
+            # which is an escalation nobody asked for. An explicitly
+            # configured FILE+BLOCK is rejected by the backend instead, where
+            # the admin can be told why.
+            resolved["action"] = realise_for_channel(tier["action"], channel)
+            if tier["severity"]:
+                resolved["severity"] = tier["severity"]
+            source = f"tier:>={tier['minRisk']}"
+            if resolved["action"] != tier["action"]:
+                source += f"+{str(channel).lower()}"
+            resolved["actionSource"] = source
+            return resolved
+        elif channel:
+            override = (policy.get("channelActions") or {}).get(str(channel).upper())
+            if override and override != policy.get("action"):
+                resolved["action"] = override
+                source = f"channel:{channel}"
+
+        if source:
+            resolved["actionSource"] = source
+        return resolved
+
 
     @staticmethod
     def _matches_gate(candidate: dict, base_rule: str, detections: list[dict]) -> bool:

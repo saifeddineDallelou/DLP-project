@@ -50,6 +50,9 @@ export const STATUS_TONES = {
   IN_PROGRESS:    { bg: 'bg-severity-medium-soft',     text: 'text-severity-medium-text',   dot: 'bg-severity-medium'     },
   RESOLVED:       { bg: 'bg-severity-low-soft',        text: 'text-severity-low-text',      dot: 'bg-severity-low'        },
   FALSE_POSITIVE: { bg: 'bg-white/5',                  text: 'text-ink-faint',              dot: 'bg-ink-faint'           },
+  // A sanctioned match. Deliberately quiet: it is auditable, not
+  // actionable, and must not read like something awaiting triage.
+  ALLOWED:        { bg: 'bg-white/5',                  text: 'text-ink-faint',              dot: 'bg-severity-low'        },
 };
 
 export const ACTION_TONES = {

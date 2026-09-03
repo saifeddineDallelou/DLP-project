@@ -248,3 +248,115 @@ describe('per-channel policy actions', () => {
     expect(after.channelActions).toEqual({ FILE: 'QUARANTINE' });
   });
 });
+
+describe('risk ladders on a policy', () => {
+  // risk, severity and action were three fields nothing reconciled -- which
+  // is how an incident could read "risk 0.93, severity CRITICAL, action
+  // ALLOW". A ladder makes confidence choose the tier and the tier carry both
+  // of the others.
+  const BASE = {
+    name: 'PII Detection',
+    conditions: { complianceRule: 'GDPR', threshold: 1 },
+    action: 'ALERT',
+    severity: 'MEDIUM',
+  };
+  async function admin() {
+    const { user } = await createUser({ role: 'ADMIN' });
+    return user;
+  }
+
+  test('stores a well-formed ladder', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: [
+        { minRisk: 0.9, action: 'QUARANTINE', severity: 'CRITICAL' },
+        { minRisk: 0.7, action: 'ALERT', severity: 'HIGH' },
+      ] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.tiers).toHaveLength(2);
+  });
+
+  test('a policy without a ladder still works', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user)).send(BASE);
+    expect(res.status).toBe(201);
+    expect(res.body.tiers).toBeNull();
+  });
+
+  test('rejects a ladder that gets softer as confidence rises', async () => {
+    // The silent version of this gives the strongest evidence the weakest
+    // response, and nothing about the stored policy would look wrong.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: [
+        { minRisk: 0.5, action: 'QUARANTINE' },
+        { minRisk: 0.9, action: 'ALERT' },
+      ] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/more weakly|softer response/i);
+  });
+
+  test('rejects two tiers at the same threshold', async () => {
+    // Which one applies would depend on array order.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: [
+        { minRisk: 0.8, action: 'ALERT' },
+        { minRisk: 0.8, action: 'QUARANTINE' },
+      ] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/distinct/i);
+  });
+
+  test('rejects a threshold outside 0..1', async () => {
+    const user = await admin();
+    for (const minRisk of [-0.1, 1.5, 'high', null]) {
+      const res = await request(app).post('/api/policies')
+        .set('Authorization', authHeader(user))
+        .send({ ...BASE, tiers: [{ minRisk, action: 'ALERT' }] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/between 0 and 1/i);
+    }
+  });
+
+  test('rejects an action outside the enum', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: [{ minRisk: 0.9, action: 'rm -rf' }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid action/i);
+  });
+
+  test('rejects a non-array', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: { minRisk: 0.9, action: 'ALERT' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/must be an array/i);
+  });
+
+  test('an equal response at a higher threshold is allowed', async () => {
+    // BLOCK then QUARANTINE is not an escalation problem: they are the same
+    // intent realised on different channels.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, tiers: [
+        { minRisk: 0.7, action: 'BLOCK' },
+        { minRisk: 0.9, action: 'QUARANTINE' },
+      ] });
+
+    expect(res.status).toBe(201);
+  });
+});

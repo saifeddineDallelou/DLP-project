@@ -1,5 +1,5 @@
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 import pytest
 
@@ -126,7 +126,8 @@ class TestDialogMonitorLoopActionBranching:
 
         # The channel decides which response is even possible: a file at
         # rest cannot be blocked in flight, a paste cannot be quarantined.
-        resolver.resolve.assert_called_once_with(detections, channel="FILE_UPLOAD")
+        resolver.resolve.assert_called_once_with(
+            detections, channel="FILE_UPLOAD", risk_score=ANY)
         mock_close.assert_called_once_with(111)
         _, kwargs = client.report_ai_leak_attempt.call_args
         assert kwargs["blocked"] is True

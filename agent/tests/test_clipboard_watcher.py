@@ -1,5 +1,5 @@
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 import clipboard_watcher as cw
 from clipboard_watcher import _scan_copied_files, _check_restricted_app
@@ -39,7 +39,8 @@ class TestCheckRestrictedApp:
         mock_copy.assert_called_once()
         # The channel decides which response is even possible: a file at
         # rest cannot be blocked in flight, a paste cannot be quarantined.
-        resolver.resolve.assert_called_once_with(detections, channel="CLIPBOARD")
+        resolver.resolve.assert_called_once_with(
+            detections, channel="CLIPBOARD", risk_score=ANY)
         client.create_incident.assert_called_once()
         _, kwargs = client.create_incident.call_args
         assert kwargs["policy_id"] == "p1"

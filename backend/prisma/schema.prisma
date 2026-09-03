@@ -40,6 +40,24 @@ model Policy {
   // Purview and Netskope model the same way: one policy for what is
   // sensitive, then a response per location.
   channelActions Json?   @map("channel_actions")
+  // Graduated response by detection confidence:
+  //
+  //   [{"minRisk": 0.9, "action": "QUARANTINE", "severity": "CRITICAL"},
+  //    {"minRisk": 0.7, "action": "ALERT",      "severity": "HIGH"}]
+  //
+  // Highest matching tier wins; content below the lowest tier produces
+  // nothing at all.
+  //
+  // This exists because risk, severity and action were three independent
+  // fields that nothing reconciled -- which is how an incident could read
+  // "risk 0.93, severity CRITICAL, action ALLOW", three statements that
+  // cannot all be sensible at once. A ladder makes the detector's confidence
+  // drive both of the others, so they cannot disagree by accident: putting
+  // ALLOW at the top of the ladder is still possible, but it is now a
+  // deliberate sentence rather than a field nobody reconciled.
+  //
+  // Null keeps the flat action/channelActions/severity behaviour.
+  tiers       Json?
   severity    Severity   @default(MEDIUM)
   enabled     Boolean    @default(true)
   version     Int        @default(1)
@@ -96,6 +114,15 @@ model Incident {
   evidence     Bytes?
   evidenceType String?        @map("evidence_type")
   riskScore    Float?         @map("risk_score")
+  // What the agent actually DID, which is not the same as what the policy
+  // says today. Without it an ALERT and a QUARANTINE are the same row: an
+  // analyst cannot tell whether the file was moved or left sitting there,
+  // and a policy edited afterwards makes the record retrospectively wrong.
+  //
+  // Nullable because incidents written before this existed cannot be
+  // reconstructed -- guessing from the current policy is exactly the mistake
+  // this field prevents.
+  actionTaken  Action?        @map("action_taken")
   assignedToId String?        @map("assigned_to_id")
   resolvedAt   DateTime?      @map("resolved_at")
   createdAt    DateTime       @default(now()) @map("created_at")
@@ -248,6 +275,11 @@ enum IncidentStatus {
   IN_PROGRESS
   RESOLVED
   FALSE_POSITIVE
+  // A sanctioned exception: the content matched, and policy said to permit
+  // it. Recorded so the carve-out can be counted -- an exception nobody can
+  // audit is indistinguishable from a hole -- but kept out of the triage
+  // queue, because there is nothing for an analyst to do about it.
+  ALLOWED
 }
 
 enum Channel {

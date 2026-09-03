@@ -27,7 +27,7 @@ router.post('/', async (req, res, next) => {
       catch { return res.status(401).json({ error: 'Invalid token' }); }
     }
 
-    const { agentId, policyId, severity, channel, evidence, evidenceType, riskScore } = req.body;
+    const { agentId, policyId, severity, channel, evidence, evidenceType, riskScore, actionTaken } = req.body;
     const resolvedAgentId = verifiedAgentId ?? agentId;
 
     if (!resolvedAgentId || !policyId || !channel) {
@@ -43,7 +43,16 @@ router.post('/', async (req, res, next) => {
         evidence:     evidence     ? Buffer.from(String(evidence)) : undefined,
         evidenceType: evidenceType ?? (evidence ? 'text' : undefined),
         riskScore:    riskScore    ?? null,
-        status:       'OPEN',
+        // What the agent DID, not what the policy says now.
+        actionTaken:  actionTaken  ?? null,
+        // A permitted match is auditable, not actionable -- it must not land
+        // in the triage queue alongside things that need a human.
+        //
+        // Written as a ternary, not a conditional spread before `status`: a
+        // later key in an object literal wins, so the spread was silently
+        // overwritten by the OPEN that followed it and every ALLOW landed in
+        // the queue anyway.
+        status:       actionTaken === 'ALLOW' ? 'ALLOWED' : 'OPEN',
       },
       include: {
         agent:  { select: { id: true, hostname: true } },

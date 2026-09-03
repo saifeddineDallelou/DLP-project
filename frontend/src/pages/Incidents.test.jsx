@@ -110,4 +110,48 @@ describe('Incidents page', () => {
     await waitFor(() =>
       expect(screen.getAllByText(/PCI-DSS - Payment Card/).length).toBeGreaterThan(0));
   });
+
+  test('shows what the agent actually did, not what the policy says', async () => {
+    // Without this an ALERT and a QUARANTINE are the same row: an analyst
+    // cannot tell whether the file was moved or left where it was. Reading it
+    // off the policy is wrong the moment the policy is edited.
+    mockIncidents([
+      incident({ id: 'i1', actionTaken: 'QUARANTINE' }),
+      incident({ id: 'i2', actionTaken: 'ALERT', agent: { id: 'a2', hostname: 'LAPTOP-02' } }),
+    ]);
+    const { container } = render(<Incidents />);
+
+    await waitFor(() => expect(container.querySelectorAll('tbody tr').length).toBe(2));
+    const rows = [...container.querySelectorAll('tbody tr')].map(r => r.textContent);
+    expect(rows[0]).toContain('QUARANTINE');
+    expect(rows[1]).toContain('ALERT');
+  });
+
+  test('an older incident with no recorded action shows none', async () => {
+    // Rows written before the field existed cannot be reconstructed, and
+    // guessing from the current policy is the mistake the field prevents.
+    mockIncidents([incident({ actionTaken: null })]);
+    const { container } = render(<Incidents />);
+
+    await waitFor(() => expect(container.querySelectorAll('tbody tr').length).toBe(1));
+    const row = container.querySelector('tbody tr').textContent;
+    for (const a of ['ALLOW', 'ALERT', 'BLOCK', 'QUARANTINE']) {
+      expect(row).not.toContain(a);
+    }
+  });
+
+  test('a permitted match is visible and filterable', async () => {
+    // An exception nobody can count is indistinguishable from a hole.
+    mockIncidents([incident({ status: 'ALLOWED', actionTaken: 'ALLOW' })]);
+    const { container } = render(<Incidents />);
+
+    await waitFor(() => expect(container.querySelectorAll('tbody tr').length).toBe(1));
+    const row = container.querySelector('tbody tr').textContent;
+    expect(row).toContain('ALLOWED');
+    expect(row).toContain('ALLOW');
+
+    const statuses = [...screen.getAllByRole('combobox')[0].options].map(o => o.value);
+    expect(statuses).toContain('ALLOWED');
+  });
+
 });

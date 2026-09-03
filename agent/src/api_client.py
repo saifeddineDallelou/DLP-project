@@ -162,6 +162,7 @@ class DLPApiClient:
         channel: str,
         evidence: str,
         risk_score: float,
+        action_taken: str | None = None,
     ) -> dict | None:
         return _request(
             "POST",
@@ -169,6 +170,9 @@ class DLPApiClient:
             json={
                 "agentId":    agent_id,
                 "policyId":   policy_id,
+                # What was actually done. The policy can be edited afterwards;
+                # the record of what happened must not change with it.
+                "actionTaken": action_taken,
                 "severity":   severity,
                 "channel":    channel,
                 "evidence":   evidence,

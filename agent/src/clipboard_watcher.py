@@ -24,7 +24,7 @@ from agent_state     import AgentState
 from ai_domain_monitor import AiBlocker, _get_foreground_title, _DLP_BLOCK_MSG
 from evidence        import safe_sample
 from file_extractor  import extract
-from file_watcher    import _risk_to_severity
+from file_watcher    import severity_for
 from quarantine      import quarantine_file
 from review_prompt   import prompt_review_request
 
@@ -90,9 +90,15 @@ def _check_restricted_app(
 
     # Sensitive content near a restricted app -- the clipboard is the
     # channel, same as a paste into an AI window.
-    policy = (policy_resolver.resolve(detections, channel="CLIPBOARD")
+    policy = (policy_resolver.resolve(detections, channel="CLIPBOARD", risk_score=risk_score)
               if policy_resolver else {"id": None, "action": "BLOCK", "name": None})
     action = policy["action"]
+
+    # Below every rung of the policy's risk ladder: this confidence is
+    # not covered at all. Distinct from ALLOW, which is a decision to
+    # permit and is recorded for audit -- NONE has nothing to record.
+    if action == "NONE":
+        return None
 
     if action == "ALLOW":
         logger.debug(f"[CLIPBOARD] Sensitive content near restricted app '{label}' but policy allows it")
@@ -110,10 +116,11 @@ def _check_restricted_app(
     incident = client.create_incident(
         agent_id=agent_id,
         policy_id=policy["id"],
-        severity=_risk_to_severity(risk_score),
+        severity=severity_for(policy, risk_score),
         channel="CLIPBOARD",
         evidence=f"Restricted app active: {label}",
         risk_score=risk_score,
+        action_taken=action,
     )
     if incident:
         logger.success(f"[CLIPBOARD] Incident REPORTED (restricted app)  id={incident.get('id')}  action={action}")

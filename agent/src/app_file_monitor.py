@@ -18,7 +18,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from agent_state import AgentState
-from file_watcher import _find_restricted_app_holding_file, _risk_to_severity
+from file_watcher import _find_restricted_app_holding_file, severity_for
 
 _POLL_INTERVAL  = 2.0    # seconds between polls
 _REPORT_COOLDOWN = 60.0  # min seconds between repeat incidents for the same (file, app) pair
@@ -64,10 +64,11 @@ def _app_file_monitor_loop(
             incident = client.create_incident(
                 agent_id=agent_id,
                 policy_id=policy.get("id"),
-                severity=_risk_to_severity(risk_score),
+                severity=severity_for(policy, risk_score),
                 channel="FILE",
                 evidence=f"{path} [open in {label}, PID {pid}]",
                 risk_score=risk_score,
+                action_taken=policy.get("action"),
             )
             if incident:
                 logger.success(f"[APP-FILE] Incident REPORTED  id={incident.get('id')}")

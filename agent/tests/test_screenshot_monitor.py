@@ -1,7 +1,7 @@
 import queue
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
 import pytest
 
@@ -111,7 +111,8 @@ class TestContentCheckAsync:
 
         # The channel decides which response is even possible: a file at
         # rest cannot be blocked in flight, a paste cannot be quarantined.
-        resolver.resolve.assert_called_once_with(detections, channel="SCREENSHOT")
+        resolver.resolve.assert_called_once_with(
+            detections, channel="SCREENSHOT", risk_score=ANY)
         mock_copy.assert_not_called()
         policy, *_rest, cleared, _detections = q.get_nowait()
         assert policy["action"] == "ALLOW"

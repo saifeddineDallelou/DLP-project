@@ -5,6 +5,7 @@ const express = require('express');
 // the column is Json -- and then reach an endpoint agent as the action it
 // enforces. Rejected here, where the caller can be told why.
 const ACTIONS = ['ALLOW', 'ALERT', 'BLOCK', 'QUARANTINE'];
+const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
 // The channels a monitor can report. QUARANTINE only means anything for FILE:
 // a file at rest has no in-flight action to stop, and equally a paste cannot
@@ -12,6 +13,66 @@ const ACTIONS = ['ALLOW', 'ALERT', 'BLOCK', 'QUARANTINE'];
 // silently does nothing -- which is exactly what BLOCK on FILE used to be.
 const CHANNELS = ['FILE', 'FILE_UPLOAD', 'CLIPBOARD', 'SCREENSHOT', 'PRINT', 'USB', 'NETWORK'];
 const AT_REST = new Set(['FILE']);
+
+// A risk ladder: at each confidence threshold, an action and a severity.
+//
+//   [{minRisk: 0.9, action: 'QUARANTINE', severity: 'CRITICAL'},
+//    {minRisk: 0.7, action: 'ALERT',      severity: 'HIGH'}]
+//
+// Validated here because these end up deciding what an endpoint agent does to
+// somebody's files, and the column is Json -- Postgres would store anything.
+function validateTiers(tiers) {
+  if (tiers === undefined || tiers === null) return null;
+  if (!Array.isArray(tiers)) return 'tiers must be an array';
+  if (tiers.length === 0) return null;
+
+  const seen = new Set();
+  for (const tier of tiers) {
+    if (typeof tier !== 'object' || tier === null || Array.isArray(tier)) {
+      return 'each tier must be an object with minRisk, action and severity';
+    }
+    // Number(null) is 0 and Number('') is 0, so an omitted threshold would
+    // silently become the BROADEST possible rung -- "applies to everything"
+    // created by leaving a field out.
+    const risk = (tier.minRisk === null || tier.minRisk === undefined || tier.minRisk === '')
+      ? NaN
+      : Number(tier.minRisk);
+    if (!Number.isFinite(risk) || risk < 0 || risk > 1) {
+      return `minRisk must be a number between 0 and 1 (got ${JSON.stringify(tier.minRisk)})`;
+    }
+    if (seen.has(risk)) {
+      // Two rungs at the same threshold: which one applies would depend on
+      // array order, which is not something an admin should have to reason
+      // about.
+      return `Two tiers share minRisk ${risk}. Each threshold must be distinct.`;
+    }
+    seen.add(risk);
+    const action = String(tier.action ?? '').toUpperCase();
+    if (!ACTIONS.includes(action)) {
+      return `Invalid action '${tier.action}' at minRisk ${risk}. Valid: ${ACTIONS.join(', ')}`;
+    }
+    if (tier.severity !== undefined && tier.severity !== null
+        && !SEVERITIES.includes(String(tier.severity).toUpperCase())) {
+      return `Invalid severity '${tier.severity}' at minRisk ${risk}. Valid: ${SEVERITIES.join(', ')}`;
+    }
+  }
+
+  // A ladder that gets SOFTER as confidence rises is almost certainly a
+  // mistake, and a silent one -- the strongest evidence would get the weakest
+  // response.
+  const rank = { ALLOW: 0, ALERT: 1, BLOCK: 2, QUARANTINE: 2 };
+  const sorted = [...tiers].sort((a, b) => Number(a.minRisk) - Number(b.minRisk));
+  for (let i = 1; i < sorted.length; i++) {
+    const lower = rank[String(sorted[i - 1].action).toUpperCase()];
+    const upper = rank[String(sorted[i].action).toUpperCase()];
+    if (upper < lower) {
+      return `Tier at minRisk ${sorted[i].minRisk} responds more weakly than the one `
+           + `below it (${sorted[i].action} after ${sorted[i - 1].action}). Higher `
+           + `confidence should not mean a softer response.`;
+    }
+  }
+  return null;
+}
 
 function validateChannelActions(channelActions) {
   if (channelActions === undefined || channelActions === null) return null;
@@ -92,15 +153,17 @@ router.get('/:id', authenticate, async (req, res, next) => {
 // POST /api/policies
 router.post('/', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
   try {
-    const { name, description, conditions, action, severity, channelActions } = req.body;
+    const { name, description, conditions, action, severity, channelActions, tiers } = req.body;
     if (!name || !conditions) {
       return res.status(400).json({ error: 'name and conditions are required' });
     }
     const channelError = validateChannelActions(channelActions);
     if (channelError) return res.status(400).json({ error: channelError });
+    const tierError = validateTiers(tiers);
+    if (tierError) return res.status(400).json({ error: tierError });
 
     const policy = await prisma.policy.create({
-      data: { name, description, conditions, action, severity, channelActions },
+      data: { name, description, conditions, action, severity, channelActions, tiers },
     });
 
     await prisma.auditLog.create({
@@ -123,9 +186,11 @@ router.post('/', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res,
 // PUT /api/policies/:id
 router.put('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
   try {
-    const { name, description, conditions, action, severity, enabled, channelActions } = req.body;
+    const { name, description, conditions, action, severity, enabled, channelActions, tiers } = req.body;
     const channelError = validateChannelActions(channelActions);
     if (channelError) return res.status(400).json({ error: channelError });
+    const tierError = validateTiers(tiers);
+    if (tierError) return res.status(400).json({ error: tierError });
 
     const policy = await prisma.policy.update({
       where: { id: req.params.id },
@@ -137,6 +202,7 @@ router.put('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, re
         ...(severity !== undefined && { severity }),
         ...(enabled !== undefined && { enabled }),
         ...(channelActions !== undefined && { channelActions }),
+        ...(tiers !== undefined && { tiers }),
         version: { increment: 1 },
       },
     });

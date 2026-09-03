@@ -325,3 +325,102 @@ class TestPerChannelActions:
         r = self._resolver({"FILE": "QUARANTINE"})
         unmatched = [{"type": "credit_card", "rule": "PCI-DSS"}]
         assert r.resolve(unmatched, channel="FILE")["action"] == "QUARANTINE"
+
+class TestRiskLadder:
+    """
+    Risk, severity and action used to be three fields nothing reconciled,
+    which is how an incident could read "risk 0.93, severity CRITICAL, action
+    ALLOW" -- three statements that cannot all be sensible at once.
+
+    A ladder makes the detector's confidence choose the tier, and the tier
+    carries both of the others. They can no longer disagree by accident.
+    """
+
+    LADDER = [
+        {"minRisk": 0.9, "action": "QUARANTINE", "severity": "CRITICAL"},
+        {"minRisk": 0.7, "action": "ALERT",      "severity": "HIGH"},
+    ]
+
+    def _resolver(self, tiers=None, **extra):
+        client = MagicMock()
+        client.list_policies.return_value = [{
+            "id": "p", "name": "PII Detection", "action": "BLOCK",
+            "severity": "MEDIUM", "enabled": True, "tiers": tiers,
+            "conditions": {"complianceRule": "GDPR", "threshold": 1},
+            **extra,
+        }]
+        r = PolicyResolver(client); r.refresh()
+        return r
+
+    DETS = [{"type": "email", "rule": "GDPR"}]
+
+    def test_the_top_rung_wins_for_high_confidence(self):
+        r = self._resolver(self.LADDER)
+        got = r.resolve(self.DETS, channel="FILE", risk_score=0.95)
+        assert got["action"] == "QUARANTINE"
+        assert got["severity"] == "CRITICAL"
+
+    def test_a_lower_rung_gives_a_softer_response_and_severity(self):
+        # Same policy, same data, lower confidence -- and severity moves WITH
+        # the action rather than being set independently.
+        r = self._resolver(self.LADDER)
+        got = r.resolve(self.DETS, channel="FILE", risk_score=0.75)
+        assert got["action"] == "ALERT"
+        assert got["severity"] == "HIGH"
+
+    def test_below_the_lowest_rung_nothing_happens(self):
+        # Not "allowed" -- simply not covered at this confidence. Callers skip
+        # NONE entirely, so no incident is written.
+        r = self._resolver(self.LADDER)
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.4)["action"] == "NONE"
+
+    def test_the_ladder_says_where_the_decision_came_from(self):
+        r = self._resolver(self.LADDER)
+        got = r.resolve(self.DETS, channel="FILE", risk_score=0.95)
+        assert got["actionSource"].startswith("tier:>=0.9")
+
+    def test_a_stop_is_realised_as_the_action_the_channel_can_perform(self):
+        # The ladder expresses intent. A file at rest is stopped by moving it;
+        # a paste is stopped by cancelling it. Asking an admin to know that
+        # per channel is how BLOCK on a file came to mean nothing at all.
+        r = self._resolver([{"minRisk": 0.5, "action": "BLOCK", "severity": "HIGH"}])
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.9)["action"] == "QUARANTINE"
+        assert r.resolve(self.DETS, channel="CLIPBOARD", risk_score=0.9)["action"] == "BLOCK"
+
+    def test_allow_on_a_rung_is_still_allow(self):
+        # Only BLOCK/QUARANTINE are "stop"; permitting is not translated.
+        r = self._resolver([{"minRisk": 0.0, "action": "ALLOW", "severity": "LOW"}])
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.99)["action"] == "ALLOW"
+
+    def test_rungs_are_evaluated_highest_first_whatever_order_they_arrive_in(self):
+        r = self._resolver(list(reversed(self.LADDER)))
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.95)["action"] == "QUARANTINE"
+
+    def test_a_policy_with_no_ladder_behaves_exactly_as_before(self):
+        r = self._resolver(None, channelActions={"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.95)["action"] == "QUARANTINE"
+        assert r.resolve(self.DETS, channel="CLIPBOARD", risk_score=0.95)["action"] == "BLOCK"
+
+    def test_a_ladder_is_ignored_when_no_risk_score_is_supplied(self):
+        # An older caller that does not pass one must not fall through to
+        # "nothing happens" and silently stop enforcing.
+        r = self._resolver(self.LADDER)
+        assert r.resolve(self.DETS, channel="FILE")["action"] == "BLOCK"
+
+    def test_a_malformed_rung_is_dropped_rather_than_enforced(self):
+        # These arrive from an API and end up deciding what happens to a
+        # user's files.
+        r = self._resolver([
+            {"minRisk": "high", "action": "QUARANTINE"},      # threshold not a number
+            {"minRisk": 0.8, "action": "DELETE_EVERYTHING"},  # not in the enum
+            {"minRisk": 0.5, "action": "ALERT", "severity": "HIGH"},
+        ])
+        got = r.resolve(self.DETS, channel="FILE", risk_score=0.95)
+        assert got["action"] == "ALERT"
+
+    def test_resolving_one_event_does_not_affect_the_next(self):
+        # Shared cache state read from several monitor threads.
+        r = self._resolver(self.LADDER)
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.95)["action"] == "QUARANTINE"
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.75)["action"] == "ALERT"
+        assert r.resolve(self.DETS, channel="FILE", risk_score=0.95)["action"] == "QUARANTINE"

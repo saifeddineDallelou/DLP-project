@@ -80,12 +80,45 @@ _EXCLUDED_EXTENSIONS = frozenset({
 })
 
 
+# An ALLOW is a decision that this content is permitted. Rendering it
+# CRITICAL puts "we let this through on purpose" and "this is an emergency"
+# in the same row, which is a contradiction an analyst has to resolve by
+# guessing. Permitted matches are recorded for audit, not for alarm.
+_ALLOWED_SEVERITY = "LOW"
+
+
 def _risk_to_severity(risk_score: float) -> str:
+    """Severity implied by the content alone, when a policy has not set one."""
     if risk_score >= 0.9:
         return "CRITICAL"
     if risk_score >= 0.7:
         return "HIGH"
     return "MEDIUM"
+
+
+def severity_for(policy: dict | None, risk_score: float) -> str:
+    """How severe this incident is, in the order that respects who decided.
+
+    1. An ALLOW is capped: whatever the data scores, permitting it is not an
+       emergency.
+    2. The POLICY's severity, when the admin set one. This field existed on
+       Policy, was editable in the dashboard, displayed on the Policies page
+       -- and read by nothing. An admin setting a policy to HIGH changed
+       nothing at all.
+    3. Otherwise derive it from the risk score, which is what every monitor
+       did unconditionally before.
+
+    The risk score stays on the incident either way, so the evidence behind
+    the number is never lost -- what changes is who gets to decide what it
+    means. Purview works the same way: severity is the admin's judgement of
+    the rule, not a restatement of the detector's confidence.
+    """
+    if policy and str(policy.get("action") or "").upper() == "ALLOW":
+        return _ALLOWED_SEVERITY
+    configured = policy.get("severity") if policy else None
+    if configured:
+        return str(configured).upper()
+    return _risk_to_severity(risk_score)
 
 
 # ── Handler ───────────────────────────────────────────────────────────────────
@@ -249,14 +282,48 @@ class _DLPHandler(FileSystemEventHandler):
         detections: list  = result.get("detections", [])
 
         if risk_score > 0.5:
-            severity = _risk_to_severity(risk_score)
             types    = [d["type"] for d in detections]
-            policy   = self.policy_resolver.resolve(detections, channel="FILE") if self.policy_resolver else {"id": POLICY_ID, "action": "BLOCK"}
+            # Resolve the policy FIRST: severity now depends on it, both for
+            # the admin's configured value and for the ALLOW cap.
+            policy   = self.policy_resolver.resolve(detections, channel="FILE", risk_score=risk_score) if self.policy_resolver else {"id": POLICY_ID, "action": "BLOCK"}
+            severity = severity_for(policy, risk_score)
+
+            if policy["action"] == "NONE":
+                # Below every rung of the policy's risk ladder. Distinct from
+                # ALLOW, which is a decision to permit and is recorded --
+                # NONE means this confidence is not covered at all.
+                logger.debug(
+                    f"[FILE-WATCHER] {filename} risk={risk_score:.2f} is below every "
+                    f"tier of '{policy.get('name') or policy['id']}' -- not covered"
+                )
+                return
 
             if policy["action"] == "ALLOW":
-                logger.debug(
-                    f"[FILE-WATCHER] {filename} matched a sensitive pattern but policy "
-                    f"'{policy.get('name') or policy['id']}' is set to ALLOW -- no incident created"
+                # Recorded, not silent.
+                #
+                # ALLOW used to return here without a trace, which made a
+                # sanctioned exception indistinguishable from a hole: there
+                # was no way to answer "how often did we let sensitive data
+                # through on purpose". An exception nobody can count is not an
+                # exception, it is an unmonitored gap -- and it is exactly the
+                # setting an attacker or a careless admin would widen.
+                #
+                # Filed as an incident with actionTaken=ALLOW and status
+                # ALLOWED, so it is auditable without sitting in the triage
+                # queue alongside things that need a human.
+                logger.info(
+                    f"[FILE-WATCHER] ALLOWED: {filename} | risk={risk_score:.2f} | "
+                    f"types={types} | policy='{policy.get('name') or policy['id']}' "
+                    f"-- sanctioned, recorded for audit"
+                )
+                self.client.create_incident(
+                    agent_id=self.agent_id,
+                    policy_id=policy["id"],
+                    severity=severity,
+                    channel="FILE",
+                    evidence=filename,
+                    risk_score=risk_score,
+                    action_taken="ALLOW",
                 )
                 return
 
@@ -307,6 +374,10 @@ class _DLPHandler(FileSystemEventHandler):
                 channel="FILE",
                 evidence=evidence,
                 risk_score=risk_score,
+                # ALERT and QUARANTINE produce the same row otherwise, and an
+                # analyst cannot tell whether the file was moved or left where
+                # it was.
+                action_taken=policy["action"],
             )
             if incident:
                 logger.success(

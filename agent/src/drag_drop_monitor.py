@@ -321,12 +321,18 @@ def _drag_loop(
 
         detections = verdict["detections"]
         policy = (
-            policy_resolver.resolve(detections, channel="FILE_UPLOAD")
+            policy_resolver.resolve(detections, channel="FILE_UPLOAD", risk_score=verdict["risk_score"])
             if policy_resolver
             else {"id": None, "action": "BLOCK", "name": None}
         )
         action = policy["action"]
         filename = os.path.basename(verdict["path"])
+
+        # Below every rung of the policy's risk ladder: this confidence is
+        # not covered at all. Distinct from ALLOW, which is a decision to
+        # permit and is recorded for audit -- NONE has nothing to record.
+        if action == "NONE":
+            return None
 
         if action == "ALLOW":
             logger.debug(

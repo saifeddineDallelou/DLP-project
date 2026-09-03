@@ -257,3 +257,61 @@ describe('PATCH /api/incidents/:id', () => {
     expect(logs).toHaveLength(1);
   });
 });
+
+describe('a permitted match is auditable, not actionable', () => {
+  // ALLOW used to leave no trace at all, which made a sanctioned exception
+  // indistinguishable from a hole. It is recorded now -- but it must not sit
+  // in the triage queue as OPEN, because there is nothing for an analyst to
+  // do about it.
+  test('an ALLOW incident lands as ALLOWED, not OPEN', async () => {
+    const agent = await createAgent();
+    const policy = await prisma.policy.create({
+      data: { name: 'Permitted', conditions: {}, action: 'ALLOW', severity: 'LOW' },
+    });
+
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({
+        agentId: agent.id, policyId: policy.id, severity: 'LOW',
+        channel: 'FILE', riskScore: 0.9, actionTaken: 'ALLOW',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.actionTaken).toBe('ALLOW');
+    expect(res.body.status).toBe('ALLOWED');
+  });
+
+  test('every other action still opens for triage', async () => {
+    const agent = await createAgent();
+    const policy = await prisma.policy.create({
+      data: { name: 'Blocked', conditions: {}, action: 'BLOCK', severity: 'HIGH' },
+    });
+
+    for (const action of ['ALERT', 'BLOCK', 'QUARANTINE']) {
+      const res = await request(app).post('/api/incidents')
+        .set('x-agent-token', agent.token)
+        .send({
+          agentId: agent.id, policyId: policy.id, severity: 'HIGH',
+          channel: 'FILE', riskScore: 0.9, actionTaken: action,
+        });
+      expect(res.body.status).toBe('OPEN');
+      expect(res.body.actionTaken).toBe(action);
+    }
+  });
+
+  test('an incident with no recorded action is unaffected', async () => {
+    // Older agents do not send the field; they must keep working.
+    const agent = await createAgent();
+    const policy = await prisma.policy.create({
+      data: { name: 'Legacy', conditions: {}, action: 'BLOCK', severity: 'HIGH' },
+    });
+
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({ agentId: agent.id, policyId: policy.id, severity: 'HIGH', channel: 'FILE' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.actionTaken).toBeNull();
+    expect(res.body.status).toBe('OPEN');
+  });
+});

@@ -141,7 +141,7 @@ cd backend
 npm install
 npx prisma migrate deploy && npm run seed
 npm run dev                                    # http://localhost:3001
-npm test                                       # 286 tests, 17 suites
+npm test                                       # 297 tests, 17 suites
 ```
 
 ### `agent/` — Windows endpoint monitor
@@ -251,10 +251,10 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 286
-cd agent      && python -m pytest -q # 410
+cd backend    && npm test            # 297
+cd agent      && python -m pytest -q # 431
 cd classifier && python -m pytest -q # 106
-cd frontend   && npm test            # 113
+cd frontend   && npm test            # 121
 ```
 
 Run locally before pushing. Note that the agent suite is **Windows-only** — it

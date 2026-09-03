@@ -1,9 +1,9 @@
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
 import pytest
 
-from file_watcher import _risk_to_severity, _DLPHandler, _find_restricted_app_holding_file
+from file_watcher import _risk_to_severity, _DLPHandler, _find_restricted_app_holding_file, severity_for
 
 
 class TestFindRestrictedAppHoldingFile:
@@ -263,11 +263,20 @@ class TestProcess:
 
         # The channel decides which response is even possible: a file at
         # rest cannot be blocked in flight, a paste cannot be quarantined.
-        resolver.resolve.assert_called_once_with(detections, channel="FILE")
+        resolver.resolve.assert_called_once_with(
+            detections, channel="FILE", risk_score=ANY)
         _, kwargs = client.create_incident.call_args
         assert kwargs["policy_id"] == "pci-dss-policy-id"
 
-    def test_allow_action_skips_incident_creation(self, tmp_path):
+    def test_allow_action_is_recorded_for_audit_not_silently_skipped(self, tmp_path):
+        """ALLOW used to return without a trace.
+
+        That made a sanctioned exception indistinguishable from a hole: there
+        was no way to answer "how often did we let sensitive data through on
+        purpose", which is exactly the setting an attacker or a careless
+        admin would widen. It is recorded now -- auditable, with
+        actionTaken=ALLOW so it never reads as a block.
+        """
         client = MagicMock()
         detections = [{"type": "credit_card", "rule": "PCI-DSS"}]
         client.classify.return_value = {"risk_score": 0.95, "detections": detections}
@@ -279,7 +288,45 @@ class TestProcess:
         f.write_text("4111111111111111")
         handler._process(str(f))
 
-        client.create_incident.assert_not_called()
+        client.create_incident.assert_called_once()
+        assert client.create_incident.call_args.kwargs["action_taken"] == "ALLOW"
+
+    def test_an_allowed_file_is_left_exactly_where_it_is(self, tmp_path):
+        # Recording the exception must not start enforcing it.
+        client = MagicMock()
+        client.classify.return_value = {
+            "risk_score": 0.95,
+            "detections": [{"type": "credit_card", "rule": "PCI-DSS"}],
+        }
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p", "action": "ALLOW", "name": "PCI-DSS"}
+        handler = _DLPHandler(client, "agent-1", policy_resolver=resolver)
+
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        with patch("file_watcher.quarantine_file") as quar:
+            handler._process(str(f))
+
+        quar.assert_not_called()
+        assert f.exists()
+
+    def test_the_incident_records_the_action_that_was_taken(self, tmp_path):
+        # ALERT and QUARANTINE are otherwise the same row, and an analyst
+        # cannot tell whether the file was moved or left where it was.
+        client = MagicMock()
+        client.classify.return_value = {
+            "risk_score": 0.95,
+            "detections": [{"type": "credit_card", "rule": "PCI-DSS"}],
+        }
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p", "action": "ALERT", "name": "PCI-DSS"}
+        handler = _DLPHandler(client, "agent-1", policy_resolver=resolver)
+
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        handler._process(str(f))
+
+        assert client.create_incident.call_args.kwargs["action_taken"] == "ALERT"
 
     def test_quarantine_action_moves_the_file_and_notes_it_in_evidence(self, tmp_path):
         client = MagicMock()
@@ -377,3 +424,68 @@ class TestProcess:
         handler._process(str(f))
 
         client.create_incident.assert_not_called()
+
+class TestSeverityRespectsWhoDecided:
+    """
+    Policy.severity was stored, editable in the dashboard, shown on the
+    Policies page -- and read by nothing. Every incident's severity came from
+    the risk score alone, so an admin marking a policy HIGH changed nothing,
+    and a permitted match could be filed as CRITICAL: "we let this through on
+    purpose" and "this is an emergency" in the same row.
+    """
+
+    def test_the_admin_s_severity_wins_over_the_risk_score(self):
+        # The whole point of the field. Purview works this way: severity is
+        # the admin's judgement of the rule, not a restatement of the
+        # detector's confidence.
+        policy = {"id": "p", "action": "BLOCK", "severity": "MEDIUM"}
+        assert severity_for(policy, 0.98) == "MEDIUM"
+
+    def test_an_allow_is_never_an_emergency(self):
+        # Whatever the content scores, permitting it is a decision that it is
+        # acceptable. CRITICAL next to ALLOW is a contradiction an analyst
+        # has to resolve by guessing.
+        policy = {"id": "p", "action": "ALLOW", "severity": "CRITICAL"}
+        assert severity_for(policy, 0.99) == "LOW"
+
+    def test_allow_is_capped_even_when_the_policy_says_nothing(self):
+        assert severity_for({"id": "p", "action": "ALLOW"}, 0.99) == "LOW"
+
+    def test_it_falls_back_to_the_risk_score_when_no_severity_is_set(self):
+        # Which is what every monitor did unconditionally before.
+        policy = {"id": "p", "action": "BLOCK"}
+        assert severity_for(policy, 0.95) == "CRITICAL"
+        assert severity_for(policy, 0.75) == "HIGH"
+        assert severity_for(policy, 0.60) == "MEDIUM"
+
+    def test_no_policy_at_all_still_works(self):
+        assert severity_for(None, 0.95) == "CRITICAL"
+
+    def test_a_lowercase_severity_is_normalised(self):
+        # It arrives from an API as whatever the caller stored.
+        assert severity_for({"id": "p", "action": "BLOCK", "severity": "high"}, 0.2) == "HIGH"
+
+    def test_the_action_is_matched_case_insensitively(self):
+        assert severity_for({"id": "p", "action": "allow", "severity": "CRITICAL"}, 0.99) == "LOW"
+
+    def test_the_risk_score_is_still_recorded_on_the_incident(self, tmp_path):
+        # Severity says how much to care; the risk score is the evidence
+        # behind it and must not be lost when the admin overrides.
+        client = MagicMock()
+        client.classify.return_value = {
+            "risk_score": 0.97,
+            "detections": [{"type": "credit_card", "rule": "PCI-DSS"}],
+        }
+        resolver = MagicMock()
+        resolver.resolve.return_value = {
+            "id": "p", "action": "ALERT", "name": "PCI-DSS", "severity": "LOW",
+        }
+        handler = _DLPHandler(client, "agent-1", policy_resolver=resolver)
+
+        f = tmp_path / "card.txt"
+        f.write_text("4111111111111111")
+        handler._process(str(f))
+
+        kwargs = client.create_incident.call_args.kwargs
+        assert kwargs["severity"] == "LOW"        # the admin's call
+        assert kwargs["risk_score"] == 0.97       # the evidence, intact
