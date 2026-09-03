@@ -208,6 +208,38 @@ describe('ReferenceSets page', () => {
     await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/edm/customers'));
   });
 
+
+  test('warns which columns are unsafe at one field', async () => {
+    // "Use this for distinctive columns" was too vague to act on. The
+    // question that decides it is whether two people can share a value: a
+    // name is an attribute, an account number an identifier, and only the
+    // second is safe alone. Indexing names at 1 field fires on a candidate
+    // who happens to share a customer's name, in a sentence containing no
+    // customer data at all.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<ReferenceSets />);
+
+    await user.click(await screen.findByRole('button', { name: /index first set/i }));
+    // 1 field is the default.
+    expect(screen.getByText(/two people cannot share/i)).toBeInTheDocument();
+    expect(document.body.textContent).toMatch(/Not safe:.*name, city/i);
+  });
+
+  test('the correlated explanation replaces it above one field', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<ReferenceSets />);
+
+    await user.click(await screen.findByRole('button', { name: /index first set/i }));
+    const fields = screen.getByLabelText(/fields required to match/i);
+    await user.clear(fields);
+    await user.type(fields, '2');
+
+    expect(screen.getByText(/fields appear together/i)).toBeInTheDocument();
+    expect(screen.queryByText(/two people cannot share/i)).not.toBeInTheDocument();
+  });
+
   test('tells the user their records are hashed, not stored', async () => {
     // Pasting real customer data into a form is a reasonable thing to
     // hesitate over; the page has to answer that before it is asked.

@@ -254,7 +254,7 @@ Configuration lives in `.env` files per component; each has a committed
 cd backend    && npm test            # 277
 cd agent      && python -m pytest -q # 400
 cd classifier && python -m pytest -q # 106
-cd frontend   && npm test            # 107
+cd frontend   && npm test            # 109
 ```
 
 Run locally before pushing. Note that the agent suite is **Windows-only** — it

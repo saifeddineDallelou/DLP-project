@@ -306,11 +306,32 @@ export default function ReferenceSets() {
             <input id="edm-min-fields" type="number" min="1" max="20" className="input"
               value={form.minFields}
               onChange={e => setForm(f => ({ ...f, minFields: e.target.value }))} />
-            <p className="text-xs text-ink-faint mt-1.5">
-              {Number(form.minFields) > 1
-                ? `A record only matches when ${form.minFields} of its fields appear together. This is what makes a common column — a surname, a city — safe to index.`
-                : 'Any single indexed value matches. Use this only for distinctive columns; a common value will fire on unrelated documents.'}
-            </p>
+            {Number(form.minFields) > 1 ? (
+              <p className="text-xs text-ink-faint mt-1.5">
+                A record only matches when {form.minFields} of its fields appear together.
+                This is what makes a common column — a surname, a city — safe to index.
+              </p>
+            ) : (
+              /* "Distinctive" was too vague to act on. The question that
+                 actually decides it is whether two different people can share
+                 a value: a name is an ATTRIBUTE, an account number is an
+                 IDENTIFIER, and only the second is safe alone. Indexing names
+                 at 1 field fires on a candidate who happens to share a
+                 customer's name, in a sentence containing no customer data. */
+              <div className="text-xs text-ink-faint mt-1.5 space-y-1">
+                <p>
+                  Any single indexed value matches — so only use this for values
+                  <span className="text-ink"> two people cannot share</span>.
+                </p>
+                <p>
+                  <span className="text-severity-low-text">Safe:</span> card number,
+                  account reference, email, employee number.{' '}
+                  <span className="text-severity-high-text">Not safe:</span> name, city,
+                  department, job title — those need 2 or more fields, or they fire on
+                  anyone who happens to share one.
+                </p>
+              </div>
+            )}
           </div>
 
           <div>
