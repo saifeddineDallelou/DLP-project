@@ -1102,3 +1102,45 @@ class TestExtensionOverridesGuessing:
             plat, _ = b._detect_platform()
 
         assert plat == "ANTHROPIC_CLAUDE"
+
+
+class TestReviewPromptIsVisibleInTheLog:
+    """
+    The prompt is a tkinter window on someone else's desktop, so "it did not
+    render" is a real failure mode -- and it used to be logged identically to
+    "the user closed it": not at all. That silence is why a live test of the
+    dialog could not be confirmed from the agent side.
+    """
+
+    def _blocker(self):
+        client = MagicMock()
+        client.request_review_ai_leak_attempt.return_value = {"id": "a1"}
+        return AiBlocker(client, "agent-1")
+
+    def test_showing_the_prompt_is_recorded(self):
+        b = self._blocker()
+        seen = []
+        with patch("ai_domain_monitor.prompt_review_request", return_value=None),              patch("ai_domain_monitor.threading.Thread", side_effect=lambda target, **k: MagicMock(start=target)):
+            with patch.object(aidm.logger, "info", lambda m, *a, **k: seen.append(str(m))):
+                b._offer_review_request("att-1", {"name": "PII Detection"}, "OPENAI_CHATGPT")
+
+        assert any("Review prompt shown" in m for m in seen)
+
+    def test_dismissing_it_is_recorded_too(self):
+        b = self._blocker()
+        seen = []
+        with patch("ai_domain_monitor.prompt_review_request", return_value=None),              patch("ai_domain_monitor.threading.Thread", side_effect=lambda target, **k: MagicMock(start=target)):
+            with patch.object(aidm.logger, "info", lambda m, *a, **k: seen.append(str(m))):
+                b._offer_review_request("att-1", {"name": "PII Detection"}, "OPENAI_CHATGPT")
+
+        assert any("dismissed" in m for m in seen)
+        # Dismissing must not file a review request.
+        b._client.request_review_ai_leak_attempt.assert_not_called()
+
+    def test_submitting_a_note_still_files_the_review(self):
+        b = self._blocker()
+        with patch("ai_domain_monitor.prompt_review_request", return_value="needed it for a support ticket"),              patch("ai_domain_monitor.threading.Thread", side_effect=lambda target, **k: MagicMock(start=target)):
+            b._offer_review_request("att-1", {"name": "PII Detection"}, "OPENAI_CHATGPT")
+
+        b._client.request_review_ai_leak_attempt.assert_called_once_with(
+            "att-1", "needed it for a support ticket")

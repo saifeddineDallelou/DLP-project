@@ -840,8 +840,25 @@ class AiBlocker:
                 f"Policy '{policy.get('name') or 'default'}' blocked a paste "
                 f"detected near {detected_plat}."
             )
+            # Logged BEFORE the dialog blocks on the user. Without this,
+            # "shown and dismissed" and "never rendered" are the same silence
+            # -- and the second is a real failure mode, since this is a
+            # tkinter window on someone else's desktop. An admin looking at a
+            # blocked incident also has to be able to tell whether the worker
+            # was ever offered the chance to explain themselves.
+            logger.info(
+                f"[AI-MONITOR] Review prompt shown  id={attempt_id}  "
+                f"platform={detected_plat}"
+            )
             note = prompt_review_request(reason)
             if note is None:
+                # Dismissed, or timed out. Not an error -- most blocks are
+                # accepted without comment -- but it is an outcome, and an
+                # outcome that is never recorded may as well not have a
+                # dialog behind it.
+                logger.info(
+                    f"[AI-MONITOR] Review prompt dismissed  id={attempt_id}"
+                )
                 return
 
             result = self._client.request_review_ai_leak_attempt(attempt_id, note or None)
