@@ -26,6 +26,7 @@ from screenshot_monitor import start_screenshot_monitor
 from app_launch_monitor import start_app_launch_monitor
 from file_dialog_monitor import start_file_dialog_monitor
 from app_file_monitor    import start_app_file_monitor
+import drop_interceptor
 from drag_drop_monitor  import start_drag_drop_monitor
 import browser_sensor
 from browser_sensor     import start_browser_sensor
@@ -231,6 +232,10 @@ def main() -> None:
     logger.info("[9/10] App file monitor started")
 
     # ── 10. Drag-drop monitor (cancels a sensitive Explorer drag onto an AI tab) ──
+    # Installed before the drag monitor, so a drag starting immediately
+    # afterwards is already covered. Falls back to the monitor's own polling
+    # if the hook cannot be installed.
+    drop_interceptor.start(stop)
     start_drag_drop_monitor(client, agent_id or "", stop, policy_resolver)
 
     # Not a monitor -- a listener. The browser extension reports which AI

@@ -402,3 +402,40 @@ class TestSamplingRateWhileADragIsInFlight:
         # The fast rate is paid only during a sensitive drag. Spending it
         # while nothing is happening would burn a core on every endpoint.
         assert ddm._POLL_INTERVAL == 0.05
+
+
+class TestTheDropIsPreventedNotRaced:
+    """
+    Polling for "cursor over an AI window" and then sending ESC is a race: a
+    practised drop lands between two samples, the file is delivered, and the
+    cancel arrives after the fact -- claiming a block that did not happen.
+
+    The interceptor is armed the moment the cursor is over a non-source window
+    with a sensitive verdict already in, so the release is swallowed rather
+    than chased.
+    """
+
+    def test_the_monitor_can_reach_the_interceptor(self):
+        assert hasattr(ddm, "drop_interceptor")
+
+    def test_arming_happens_before_the_action_is_resolved(self):
+        # The release can land between any two lines of the loop. Arming
+        # after resolving a policy would leave exactly the gap this closes.
+        import inspect
+        src = inspect.getsource(ddm._drag_loop)
+        arm_at = src.index("drop_interceptor.arm(")
+        resolve_at = src.index("policy_resolver.resolve(")
+        assert arm_at < resolve_at
+
+    def test_every_release_disarms(self):
+        # Left armed, the next unrelated click over a browser is eaten too.
+        import inspect
+        src = inspect.getsource(ddm._drag_loop)
+        assert "drop_interceptor.disarm()" in src
+
+    def test_escape_is_still_sent_as_a_fallback(self):
+        # The hook may not have installed at all -- an older Windows, a
+        # policy blocking hooks. The polling cancel stays as the floor.
+        import inspect
+        src = inspect.getsource(ddm._drag_loop)
+        assert "_send_escape()" in src

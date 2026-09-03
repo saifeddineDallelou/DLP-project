@@ -62,6 +62,7 @@ from loguru import logger
 
 from api_client import DLPApiClient
 from evidence import safe_sample
+import drop_interceptor
 from repeat_window import RepeatWindow, fingerprint
 from review_prompt import offer_review
 from file_extractor import extract
@@ -293,6 +294,10 @@ def _drag_loop(
         if not pressed:
             if state.active:
                 logger.debug("[DRAG-DROP] Drag ended")
+            # Disarmed on every release, including one the hook swallowed:
+            # leaving it armed would mean the next unrelated click over a
+            # browser was eaten too.
+            drop_interceptor.disarm()
             state.reset()
             stop.wait(_POLL_INTERVAL)
             continue
@@ -373,6 +378,19 @@ def _drag_loop(
             stop.wait(_POLL_INTERVAL)
             continue
 
+        # ARM THE INTERCEPTOR before deciding anything else.
+        #
+        # From here the cursor is over a window that is not the drag source.
+        # If the content turns out to be sensitive, the release must not reach
+        # that window -- and the release can happen between any two lines of
+        # this loop, which is exactly how a fast drop used to get through.
+        # The hook is what makes the drop impossible rather than merely
+        # unlikely; the ESC below is still sent, for the case where the hook
+        # could not be installed at all.
+        armed_verdict = state.verdict
+        if armed_verdict and armed_verdict["risk_score"] > 0.5:
+            drop_interceptor.arm({target})
+
         verdict = state.verdict
         if verdict is None:
             # Classification still running. Nothing is claimed either way --
@@ -388,6 +406,12 @@ def _drag_loop(
             state.handled = True
             stop.wait(_POLL_INTERVAL)
             continue
+
+        # Did the hook already swallow the release? Then the drop is not
+        # "about to be cancelled" -- it has already been prevented, and the
+        # incident should say the thing that happened rather than the thing
+        # that was attempted.
+        intercepted = drop_interceptor.take_interception()
 
         detections = verdict["detections"]
         policy = (
@@ -415,11 +439,16 @@ def _drag_loop(
 
         blocked = action in ("BLOCK", "QUARANTINE")
         if blocked:
+            # Sent even when the hook already swallowed the release: the
+            # source is still in its drag loop either way, and a second ESC
+            # against an already-cancelled drag does nothing.
             _send_escape()
 
+        how = ("INTERCEPTED (the drop never reached the target)" if intercepted
+               else "CANCELLED" if blocked
+               else "DETECTED (ALERT only)")
         logger.critical(
-            f"[DRAG-DROP] !! SENSITIVE FILE DRAG "
-            f"{'CANCELLED' if blocked else 'DETECTED (ALERT only)'} -- "
+            f"[DRAG-DROP] !! SENSITIVE FILE DRAG {how} -- "
             f"{filename} -> {platform} | risk={verdict['risk_score']:.2f} | "
             f"action={action}"
         )
