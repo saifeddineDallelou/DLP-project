@@ -334,6 +334,21 @@ def _window_owner_pids(windows: list[tuple[int, str]]) -> set[int]:
 
 # ── AiBlocker — shared between ai_domain_monitor loop and clipboard_watcher ──
 
+def _content_fingerprint(content_sample: str, detections: list | None) -> str:
+    """A stable id for WHAT was copied, so a repeat can be told from a new leak.
+
+    Built from the already-masked sample and the detection types, never from
+    the raw content -- this is held in memory for the length of a cooldown
+    window and must not become somewhere sensitive data lives. Hashing also
+    means two different files that happen to produce the same masked sample
+    are treated as the same event, which is the conservative direction: it
+    can only ever suppress a duplicate popup, never a distinct one.
+    """
+    import hashlib
+    types = ",".join(sorted((d.get("type") or "") for d in (detections or [])))
+    return hashlib.sha256(f"{content_sample}|{types}".encode("utf-8", "replace")).hexdigest()
+
+
 class AiBlocker:
     """
     Thread-safe detection + clipboard-clear engine.
@@ -359,9 +374,18 @@ class AiBlocker:
         # platform's still-cooling-down clear timer).
         self._last_clip_clear: dict[str, float] = {}
         self._last_alerted: dict[str, float]    = {}
-        # Separate from _last_alerted: the review prompt is throttled on its
-        # own timer, so it stays quiet even as repeats keep being counted.
-        self._last_prompted: dict[str, float]   = {}
+        # platform -> fingerprint of the content that opened the current
+        # window.
+        #
+        # Time alone cannot tell a REPEAT from a NEW LEAK. Copy a file, get
+        # blocked, then copy something different ten seconds later: that is a
+        # second, unrelated attempt, and it was being folded into the first
+        # incident's repeat counter with no popup of its own -- so the user
+        # saw one warning for two different pieces of data leaving.
+        #
+        # A window now belongs to the content that opened it. Different
+        # content is a different event, however soon it follows.
+        self._last_content: dict[str, str]      = {}
         # platform -> id of the attempt row the current window is counting
         # onto. Cleared when a window closes, so a new burst opens a new row.
         self._open_attempt: dict[str, str]      = {}
@@ -773,29 +797,36 @@ class AiBlocker:
         else:
             do_alert = fresh_attempt
             repeat_of = None
+            fingerprint = _content_fingerprint(content_sample, detections)
             if do_alert:
                 with self._lock:
                     since_alert = now - self._last_alerted.get(detected_plat, 0.0)
-                    if since_alert < _ALERT_COOLDOWN:
-                        # Still inside the window: count against the row that
-                        # opened it, if we still know which one that was.
+                    same_content = fingerprint == self._last_content.get(detected_plat)
+                    if same_content and since_alert < _ALERT_COOLDOWN:
+                        # The SAME content, again, inside the window: count
+                        # against the row that opened it rather than filing a
+                        # near-identical second one.
                         repeat_of = self._open_attempt.get(detected_plat)
                     if repeat_of is None:
-                        # Opening a new window -- the next row becomes the one
-                        # repeats accumulate onto.
+                        # A new event -- either different content, or the same
+                        # content after the window closed. The next row becomes
+                        # the one repeats accumulate onto.
                         self._last_alerted[detected_plat] = now
+                        self._last_content[detected_plat] = fingerprint
 
-        # The POPUP is throttled on the same window. One interruption a minute
-        # is plenty -- being asked to justify yourself on every keystroke is
-        # how a DLP agent gets switched off -- and a repeat never prompts,
-        # because by definition its window already did.
-        do_prompt = False
-        if do_alert and repeat_of is None:
-            with self._lock:
-                since_prompt = now - self._last_prompted.get(detected_plat, 0.0)
-                do_prompt    = since_prompt >= _ALERT_COOLDOWN
-                if do_prompt:
-                    self._last_prompted[detected_plat] = now
+        # One popup per EVENT.
+        #
+        # `repeat_of is None` already means "this is a new event": different
+        # content, or the same content after its window closed. So the popup
+        # follows it directly and needs no timer of its own -- which is what
+        # the second timer got wrong. Being blocked on a different file ten
+        # seconds after the first block is a separate thing happening, and it
+        # was passing silently: content stopped, no popup, no way to know a
+        # second piece of data had just been caught.
+        #
+        # Repeats of the same content still stay quiet. Being asked to justify
+        # yourself on every keystroke is how a DLP agent gets switched off.
+        do_prompt = do_alert and repeat_of is None
 
         if do_alert:
             if do_clear:

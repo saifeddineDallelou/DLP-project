@@ -251,7 +251,6 @@ class TestAiBlocker:
             # Age the window out.
             with blocker._lock:
                 blocker._last_alerted["GROK"] -= (aidm._ALERT_COOLDOWN + 1)
-                blocker._last_prompted["GROK"] -= (aidm._ALERT_COOLDOWN + 1)
             blocker.check_and_block(t_detect=time.monotonic())
             _join_report_threads()
 
@@ -1147,3 +1146,101 @@ class TestReviewPromptIsVisibleInTheLog:
 
         b._client.request_review_ai_leak_attempt.assert_called_once_with(
             "att-1", "needed it for a support ticket")
+
+
+class TestOnePopupPerEvent:
+    """
+    Copy a file, get blocked. Ten seconds later copy something DIFFERENT --
+    also blocked, but silently: no popup, and the attempt counted onto the
+    first incident's repeat counter.
+
+    Two different pieces of data were caught leaving and the user was warned
+    once, with no way to tell the second had happened at all. The grouping and
+    the popup were both keyed on a per-platform TIMER, so anything inside 60
+    seconds was treated as the same event no matter what it was.
+
+    A window belongs to the CONTENT that opened it. Different content is a
+    different event, however soon it follows.
+    """
+
+    def _blocker(self):
+        client = MagicMock()
+        client.report_ai_leak_attempt.side_effect = [
+            {"id": "a1"}, {"id": "a2"}, {"id": "a3"}, {"id": "a4"},
+        ]
+        client.repeat_ai_leak_attempt.return_value = {"id": "a1", "attempts": 2}
+        resolver = MagicMock()
+        resolver.resolve.return_value = {"id": "p1", "action": "BLOCK", "name": "PII"}
+        return AiBlocker(client, "agent-1", resolver), client
+
+    CARD = [{"type": "credit_card", "rule": "PCI-DSS"}]
+    ROW  = [{"type": "edm:customers:row", "rule": "GDPR"}]
+
+    def test_different_content_inside_the_window_is_its_own_event(self):
+        blocker, client = self._blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.prompt_review_request") as prompt:
+            blocker.check_and_block(t_detect=time.monotonic(),
+                                    content_sample="FILE:cards.csv", detections=self.CARD)
+            blocker.check_and_block(t_detect=time.monotonic(),
+                                    content_sample="Sarah O****r", detections=self.ROW)
+            _join_report_threads()
+
+        # Two rows, no repeat -- and crucially, two popups.
+        assert client.report_ai_leak_attempt.call_count == 2
+        assert client.repeat_ai_leak_attempt.call_count == 0
+        assert prompt.call_count == 2
+
+    def test_the_same_content_inside_the_window_stays_one_event(self):
+        # The behaviour that was already right, and must stay right: being
+        # asked to justify yourself on every keystroke is how a DLP agent
+        # gets switched off.
+        blocker, client = self._blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.prompt_review_request") as prompt:
+            for _ in range(3):
+                blocker.check_and_block(t_detect=time.monotonic(),
+                                        content_sample="FILE:cards.csv", detections=self.CARD)
+            _join_report_threads()
+
+        assert client.report_ai_leak_attempt.call_count == 1
+        assert client.repeat_ai_leak_attempt.call_count == 2
+        assert prompt.call_count == 1
+
+    def test_the_same_content_after_the_window_is_a_new_event(self):
+        blocker, client = self._blocker()
+        with patch.object(blocker, "_detect_platform", return_value=("GROK", "w")), \
+             patch("ai_domain_monitor.pyperclip.copy"), \
+             patch("ai_domain_monitor.prompt_review_request") as prompt:
+            blocker.check_and_block(t_detect=time.monotonic(),
+                                    content_sample="FILE:cards.csv", detections=self.CARD)
+            _join_report_threads()
+            with blocker._lock:
+                blocker._last_alerted["GROK"] -= (aidm._ALERT_COOLDOWN + 1)
+            blocker.check_and_block(t_detect=time.monotonic(),
+                                    content_sample="FILE:cards.csv", detections=self.CARD)
+            _join_report_threads()
+
+        assert client.report_ai_leak_attempt.call_count == 2
+        assert prompt.call_count == 2
+
+    def test_the_fingerprint_ignores_ordering_of_detections(self):
+        # The classifier does not promise a stable order, and re-ordering the
+        # same findings is not a new leak.
+        a = aidm._content_fingerprint("x", [{"type": "iban"}, {"type": "ssn"}])
+        b = aidm._content_fingerprint("x", [{"type": "ssn"}, {"type": "iban"}])
+        assert a == b
+
+    def test_the_fingerprint_separates_different_content(self):
+        a = aidm._content_fingerprint("FILE:cards.csv", self.CARD)
+        b = aidm._content_fingerprint("Sarah O****r", self.ROW)
+        assert a != b
+
+    def test_the_fingerprint_holds_no_readable_content(self):
+        # It lives in memory for the length of a window; it must not become
+        # somewhere sensitive data lives.
+        fp = aidm._content_fingerprint("Sarah Okafor, Manchester", self.ROW)
+        assert "Sarah" not in fp and "Okafor" not in fp
+        assert len(fp) == 64
