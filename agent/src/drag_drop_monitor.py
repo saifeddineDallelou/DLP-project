@@ -321,7 +321,7 @@ def _drag_loop(
 
         detections = verdict["detections"]
         policy = (
-            policy_resolver.resolve(detections)
+            policy_resolver.resolve(detections, channel="FILE_UPLOAD")
             if policy_resolver
             else {"id": None, "action": "BLOCK", "name": None}
         )

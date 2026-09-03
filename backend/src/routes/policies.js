@@ -1,4 +1,44 @@
 const express = require('express');
+
+// Valid Action values, mirrored from prisma/schema.prisma. A per-channel
+// override that is not one of these would be stored happily by Postgres --
+// the column is Json -- and then reach an endpoint agent as the action it
+// enforces. Rejected here, where the caller can be told why.
+const ACTIONS = ['ALLOW', 'ALERT', 'BLOCK', 'QUARANTINE'];
+
+// The channels a monitor can report. QUARANTINE only means anything for FILE:
+// a file at rest has no in-flight action to stop, and equally a paste cannot
+// be moved to a quarantine folder. Validating the pair stops a policy that
+// silently does nothing -- which is exactly what BLOCK on FILE used to be.
+const CHANNELS = ['FILE', 'FILE_UPLOAD', 'CLIPBOARD', 'SCREENSHOT', 'PRINT', 'USB', 'NETWORK'];
+const AT_REST = new Set(['FILE']);
+
+function validateChannelActions(channelActions) {
+  if (channelActions === undefined || channelActions === null) return null;
+  if (typeof channelActions !== 'object' || Array.isArray(channelActions)) {
+    return 'channelActions must be an object of channel -> action';
+  }
+  for (const [channel, action] of Object.entries(channelActions)) {
+    const ch = String(channel).toUpperCase();
+    if (!CHANNELS.includes(ch)) {
+      return `Unknown channel '${channel}'. Valid: ${CHANNELS.join(', ')}`;
+    }
+    if (!ACTIONS.includes(String(action).toUpperCase())) {
+      return `Invalid action '${action}' for ${ch}. Valid: ${ACTIONS.join(', ')}`;
+    }
+    const act = String(action).toUpperCase();
+    if (act === 'QUARANTINE' && !AT_REST.has(ch)) {
+      return `QUARANTINE is only meaningful for data at rest (${[...AT_REST].join(', ')}). `
+           + `${ch} is an action in flight -- use BLOCK.`;
+    }
+    if (act === 'BLOCK' && AT_REST.has(ch)) {
+      return `BLOCK cannot stop a file that is already at rest -- there is nothing in `
+           + `flight to intercept, so it would only record an incident. Use QUARANTINE `
+           + `to remove the file, or ALERT if recording is what you want.`;
+    }
+  }
+  return null;
+}
 const jwt = require('jsonwebtoken');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
@@ -52,13 +92,15 @@ router.get('/:id', authenticate, async (req, res, next) => {
 // POST /api/policies
 router.post('/', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
   try {
-    const { name, description, conditions, action, severity } = req.body;
+    const { name, description, conditions, action, severity, channelActions } = req.body;
     if (!name || !conditions) {
       return res.status(400).json({ error: 'name and conditions are required' });
     }
+    const channelError = validateChannelActions(channelActions);
+    if (channelError) return res.status(400).json({ error: channelError });
 
     const policy = await prisma.policy.create({
-      data: { name, description, conditions, action, severity },
+      data: { name, description, conditions, action, severity, channelActions },
     });
 
     await prisma.auditLog.create({
@@ -81,7 +123,9 @@ router.post('/', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res,
 // PUT /api/policies/:id
 router.put('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, res, next) => {
   try {
-    const { name, description, conditions, action, severity, enabled } = req.body;
+    const { name, description, conditions, action, severity, enabled, channelActions } = req.body;
+    const channelError = validateChannelActions(channelActions);
+    if (channelError) return res.status(400).json({ error: channelError });
 
     const policy = await prisma.policy.update({
       where: { id: req.params.id },
@@ -92,6 +136,7 @@ router.put('/:id', authenticate, requireRole('ADMIN', 'ANALYST'), async (req, re
         ...(action !== undefined && { action }),
         ...(severity !== undefined && { severity }),
         ...(enabled !== undefined && { enabled }),
+        ...(channelActions !== undefined && { channelActions }),
         version: { increment: 1 },
       },
     });

@@ -608,7 +608,7 @@ class AiBlocker:
             return None
 
         policy = (
-            self._policy_resolver.resolve(detections or [])
+            self._policy_resolver.resolve(detections or [], channel="CLIPBOARD")
             if self._policy_resolver
             else {"id": None, "action": "BLOCK", "name": None}
         )

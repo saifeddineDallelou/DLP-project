@@ -236,3 +236,92 @@ class TestPatternsAndThresholdGate:
 
         detections = [{"rule": "PCI-DSS", "type": "credit_card"}, {"rule": "HIPAA", "type": "keyword"}]
         assert resolver.resolve(detections)["id"] == "hipaa-1"
+
+
+class TestPerChannelActions:
+    """
+    The right response depends on where the data is moving, not only on what
+    it is. A paste, a drag or a file-picker selection is an action IN FLIGHT
+    and can be stopped; a file sitting in a watched folder is not doing
+    anything, so there is nothing to intercept and the only real response is
+    to move it.
+
+    Without this, BLOCK on a file at rest wrote an incident and left the file
+    exactly where it was -- indistinguishable from ALERT, while the log
+    claimed action=BLOCK. Purview and Netskope split the same way: one policy
+    for what is sensitive, then a response per location.
+    """
+
+    def _resolver(self, channel_actions):
+        client = MagicMock()
+        client.list_policies.return_value = [{
+            "id": "p-pii",
+            "name": "PII Detection",
+            "action": "BLOCK",
+            "enabled": True,
+            "channelActions": channel_actions,
+            "conditions": {"complianceRule": "GDPR", "threshold": 1},
+        }]
+        r = PolicyResolver(client)
+        r.refresh()
+        return r
+
+    DETECTIONS = [{"type": "email", "rule": "GDPR"}]
+
+    def test_a_channel_override_replaces_the_default_action(self):
+        r = self._resolver({"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "QUARANTINE"
+
+    def test_an_unlisted_channel_keeps_the_default(self):
+        r = self._resolver({"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETECTIONS, channel="CLIPBOARD")["action"] == "BLOCK"
+
+    def test_no_channel_at_all_keeps_the_default(self):
+        # Every caller behaved this way before channels existed.
+        r = self._resolver({"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETECTIONS)["action"] == "BLOCK"
+
+    def test_a_policy_with_no_overrides_is_unchanged(self):
+        r = self._resolver(None)
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "BLOCK"
+
+    def test_the_channel_name_is_matched_case_insensitively(self):
+        r = self._resolver({"file": "quarantine"})
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "QUARANTINE"
+
+    def test_resolving_one_channel_does_not_affect_another(self):
+        # The entries are shared cache state read from several monitor
+        # threads. Rewriting `action` in place would leak one channel's
+        # response into every other channel's next lookup.
+        r = self._resolver({"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "QUARANTINE"
+        assert r.resolve(self.DETECTIONS, channel="CLIPBOARD")["action"] == "BLOCK"
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "QUARANTINE"
+
+    def test_the_override_says_where_it_came_from(self):
+        # An incident showing QUARANTINE when the policy reads BLOCK is
+        # confusing unless the record says which channel rule applied.
+        r = self._resolver({"FILE": "QUARANTINE"})
+        assert r.resolve(self.DETECTIONS, channel="FILE")["actionSource"] == "channel:FILE"
+        assert "actionSource" not in r.resolve(self.DETECTIONS, channel="CLIPBOARD")
+
+    def test_an_override_equal_to_the_default_is_not_marked_as_one(self):
+        r = self._resolver({"FILE": "BLOCK"})
+        resolved = r.resolve(self.DETECTIONS, channel="FILE")
+        assert resolved["action"] == "BLOCK"
+        assert "actionSource" not in resolved
+
+    def test_a_malformed_override_is_ignored_rather_than_obeyed(self):
+        # Policies are edited in a dashboard; a value that is not a string
+        # must not become the action a monitor enforces.
+        r = self._resolver({"FILE": {"nested": "object"}, "CLIPBOARD": 42})
+        assert r.resolve(self.DETECTIONS, channel="FILE")["action"] == "BLOCK"
+        assert r.resolve(self.DETECTIONS, channel="CLIPBOARD")["action"] == "BLOCK"
+
+    def test_the_default_policy_also_honours_channels(self):
+        # A detection with no matching compliance rule falls back to the
+        # default policy -- which must still respect its own channel rules,
+        # or the fallback silently ignores them.
+        r = self._resolver({"FILE": "QUARANTINE"})
+        unmatched = [{"type": "credit_card", "rule": "PCI-DSS"}]
+        assert r.resolve(unmatched, channel="FILE")["action"] == "QUARANTINE"

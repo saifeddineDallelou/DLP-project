@@ -251,7 +251,7 @@ class _DLPHandler(FileSystemEventHandler):
         if risk_score > 0.5:
             severity = _risk_to_severity(risk_score)
             types    = [d["type"] for d in detections]
-            policy   = self.policy_resolver.resolve(detections) if self.policy_resolver else {"id": POLICY_ID, "action": "BLOCK"}
+            policy   = self.policy_resolver.resolve(detections, channel="FILE") if self.policy_resolver else {"id": POLICY_ID, "action": "BLOCK"}
 
             if policy["action"] == "ALLOW":
                 logger.debug(

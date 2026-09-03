@@ -88,7 +88,10 @@ def _check_restricted_app(
     if not label:
         return None
 
-    policy = policy_resolver.resolve(detections) if policy_resolver else {"id": None, "action": "BLOCK", "name": None}
+    # Sensitive content near a restricted app -- the clipboard is the
+    # channel, same as a paste into an AI window.
+    policy = (policy_resolver.resolve(detections, channel="CLIPBOARD")
+              if policy_resolver else {"id": None, "action": "BLOCK", "name": None})
     action = policy["action"]
 
     if action == "ALLOW":

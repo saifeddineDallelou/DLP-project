@@ -130,3 +130,121 @@ describe('policies routes', () => {
     expect(found).toBeNull();
   });
 });
+
+describe('per-channel policy actions', () => {
+  // The right response depends on where data is moving. A paste can be
+  // stopped in flight; a file already sitting in a folder cannot, so BLOCK
+  // there only ever wrote an incident while claiming to have blocked
+  // something. The pairing is validated here rather than discovered later by
+  // an operator wondering why nothing happened.
+  async function admin() {
+    const { user } = await createUser({ role: 'ADMIN' });
+    return user;
+  }
+  const BASE = {
+    name: 'PII Detection',
+    conditions: { complianceRule: 'GDPR', threshold: 1 },
+    action: 'BLOCK',
+    severity: 'HIGH',
+  };
+
+  test('stores a valid per-channel override', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { FILE: 'QUARANTINE', CLIPBOARD: 'BLOCK' } });
+
+    expect(res.status).toBe(201);
+    expect(res.body.channelActions).toEqual({ FILE: 'QUARANTINE', CLIPBOARD: 'BLOCK' });
+  });
+
+  test('a policy without overrides still works', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user)).send(BASE);
+    expect(res.status).toBe(201);
+    expect(res.body.channelActions).toBeNull();
+  });
+
+  test('rejects BLOCK on a file at rest, and says why', async () => {
+    // This is the exact configuration that silently did nothing.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { FILE: 'BLOCK' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/nothing in flight to intercept/i);
+    expect(res.body.error).toMatch(/QUARANTINE/);
+  });
+
+  test('rejects QUARANTINE on an in-flight channel', async () => {
+    // There is no file to move when someone pastes.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { CLIPBOARD: 'QUARANTINE' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only meaningful for data at rest/i);
+  });
+
+  test('rejects an unknown channel', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { CARRIER_PIGEON: 'BLOCK' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unknown channel/i);
+  });
+
+  test('rejects an action that is not one of the four', async () => {
+    // The column is Json, so Postgres would store anything -- and an endpoint
+    // agent would then receive it as the action to enforce.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { FILE: 'DELETE_EVERYTHING' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid action/i);
+  });
+
+  test('rejects a non-object', async () => {
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: ['FILE', 'QUARANTINE'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/must be an object/i);
+  });
+
+  test('an update can add overrides to an existing policy', async () => {
+    const user = await admin();
+    const created = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user)).send(BASE);
+
+    const res = await request(app).put(`/api/policies/${created.body.id}`)
+      .set('Authorization', authHeader(user))
+      .send({ channelActions: { FILE: 'QUARANTINE' } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.channelActions).toEqual({ FILE: 'QUARANTINE' });
+  });
+
+  test('an invalid update does not change the stored policy', async () => {
+    const user = await admin();
+    const created = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { FILE: 'QUARANTINE' } });
+
+    await request(app).put(`/api/policies/${created.body.id}`)
+      .set('Authorization', authHeader(user))
+      .send({ channelActions: { FILE: 'BLOCK' } });
+
+    const after = await prisma.policy.findUnique({ where: { id: created.body.id } });
+    expect(after.channelActions).toEqual({ FILE: 'QUARANTINE' });
+  });
+});

@@ -79,4 +79,70 @@ describe('Policies page', () => {
     expect(screen.getByText('HIPAA - PHI')).toBeInTheDocument();
     expect(screen.getByText('ALERT')).toBeInTheDocument();
   });
+
+  test('offers a response per channel, defaulting to the policy action', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+
+    // Every channel starts on the policy default rather than inventing one.
+    expect(screen.getByLabelText(/clipboard action/i)).toHaveValue('');
+    expect(screen.getByLabelText(/file at rest action/i)).toHaveValue('');
+  });
+
+  test('only offers responses a channel can actually carry out', async () => {
+    // A file already at rest has nothing in flight to stop, and a paste
+    // cannot be moved to a quarantine folder. Offering the impossible option
+    // is how a policy ends up silently doing nothing.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+
+    const atRest = [...screen.getByLabelText(/file at rest action/i).options].map(o => o.value);
+    expect(atRest).toContain('QUARANTINE');
+    expect(atRest).not.toContain('BLOCK');
+
+    const clipboard = [...screen.getByLabelText(/clipboard action/i).options].map(o => o.value);
+    expect(clipboard).toContain('BLOCK');
+    expect(clipboard).not.toContain('QUARANTINE');
+  });
+
+  test('sends the chosen overrides with the policy', async () => {
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    api.post.mockResolvedValue({ data: policy() });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.type(screen.getByLabelText(/^name/i), 'PII Detection');
+    await user.selectOptions(screen.getByLabelText(/file at rest action/i), 'QUARANTINE');
+    await user.click(screen.getByRole('button', { name: /create policy|save/i }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(api.post.mock.calls[0][1].channelActions).toEqual({ FILE: 'QUARANTINE' });
+  });
+
+  test('clearing a channel back to Default removes the override', async () => {
+    // Otherwise "Default" would be stored as an empty string and reach the
+    // agent as an action it does not recognise.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    api.post.mockResolvedValue({ data: policy() });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+    await user.type(screen.getByLabelText(/^name/i), 'PII Detection');
+    const atRest = screen.getByLabelText(/file at rest action/i);
+    await user.selectOptions(atRest, 'QUARANTINE');
+    await user.selectOptions(atRest, '');
+    await user.click(screen.getByRole('button', { name: /create policy|save/i }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(api.post.mock.calls[0][1].channelActions).toEqual({});
+  });
+
 });

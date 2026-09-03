@@ -129,7 +129,9 @@ class TestAiBlocker:
             with patch("ai_domain_monitor.pyperclip.copy"):
                 blocker.check_and_block(t_detect=time.monotonic(), detections=detections)
 
-        resolver.resolve.assert_called_once_with(detections)
+        # The channel decides which response is even possible: a file at
+        # rest cannot be blocked in flight, a paste cannot be quarantined.
+        resolver.resolve.assert_called_once_with(detections, channel="CLIPBOARD")
 
     def test_clipboard_is_cleared_every_time_not_just_once_per_cooldown(self):
         """Regression: the clear used to be gated behind _CLIP_CLEAR_COOLDOWN.

@@ -13,8 +13,26 @@ import { formatDate } from '../utils/format.js';
 
 const EMPTY_FORM = {
   name: '', description: '', conditions: { patterns: [], threshold: 1 },
-  action: 'ALERT', severity: 'MEDIUM', enabled: true,
+  action: 'ALERT', severity: 'MEDIUM', enabled: true, channelActions: {},
 };
+
+// Which responses a channel can actually carry out.
+//
+// A paste, a drag or a file-picker selection is an action IN FLIGHT: it can
+// be stopped. A file already sitting in a watched folder is not doing
+// anything, so there is nothing to intercept -- BLOCK there would only write
+// an incident while claiming to have blocked something, which is exactly what
+// it used to do. Moving the file is the only real response.
+const CHANNELS = [
+  { key: 'CLIPBOARD',   label: 'Clipboard',        hint: 'Copy/paste into an AI window or restricted app',
+    actions: ['ALLOW', 'ALERT', 'BLOCK'] },
+  { key: 'FILE_UPLOAD', label: 'File upload',      hint: 'Dragged onto a page, or chosen in a file dialog',
+    actions: ['ALLOW', 'ALERT', 'BLOCK'] },
+  { key: 'SCREENSHOT',  label: 'Screenshot',       hint: 'Screen capture while sensitive content is visible',
+    actions: ['ALLOW', 'ALERT', 'BLOCK'] },
+  { key: 'FILE',        label: 'File at rest',     hint: 'Found in a watched folder — nothing in flight to stop',
+    actions: ['ALLOW', 'ALERT', 'QUARANTINE'] },
+];
 
 export default function Policies() {
   const [policies, setPolicies]     = useState([]);
@@ -51,6 +69,7 @@ export default function Policies() {
       action: p.action,
       severity: p.severity,
       enabled: p.enabled,
+      channelActions: p.channelActions ?? {},
     });
     setFormError('');
     setEditTarget(p);
@@ -65,6 +84,7 @@ export default function Policies() {
       const payload = {
         name: form.name, description: form.description || undefined,
         conditions: form.conditions, action: form.action, severity: form.severity, enabled: form.enabled,
+        channelActions: form.channelActions,
       };
       if (editTarget?.id) {
         await api.put(`/api/policies/${editTarget.id}`, payload);
@@ -172,8 +192,8 @@ export default function Policies() {
           )}
 
           <div>
-            <label className="label">Name *</label>
-            <input className="input" value={form.name}
+            <label className="label" htmlFor="policy-name">Name *</label>
+            <input id="policy-name" className="input" value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))} required />
           </div>
 
@@ -204,6 +224,40 @@ export default function Policies() {
                 onChange={e => setForm(f => ({ ...f, severity: e.target.value }))}>
                 {['LOW','MEDIUM','HIGH','CRITICAL'].map(s => <option key={s}>{s}</option>)}
               </select>
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <p className="label mb-1">Response by channel</p>
+            <p className="text-xs text-ink-faint mb-3">
+              The default above applies wherever a channel is left on
+              <span className="font-mono"> Default</span>. Set one here when the response
+              should differ — the same data warrants a different answer depending on
+              whether it is moving or sitting still.
+            </p>
+            <div className="space-y-2">
+              {CHANNELS.map(ch => (
+                <div key={ch.key} className="flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-ink">{ch.label}</p>
+                    <p className="text-[11px] text-ink-faint truncate" title={ch.hint}>{ch.hint}</p>
+                  </div>
+                  <select
+                    className="select w-40 shrink-0"
+                    aria-label={`${ch.label} action`}
+                    value={form.channelActions?.[ch.key] ?? ''}
+                    onChange={e => setForm(f => {
+                      const next = { ...(f.channelActions ?? {}) };
+                      if (e.target.value) next[ch.key] = e.target.value;
+                      else delete next[ch.key];
+                      return { ...f, channelActions: next };
+                    })}
+                  >
+                    <option value="">Default ({form.action})</option>
+                    {ch.actions.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+              ))}
             </div>
           </div>
 

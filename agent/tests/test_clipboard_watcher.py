@@ -37,7 +37,9 @@ class TestCheckRestrictedApp:
 
         assert result == "BLOCK"
         mock_copy.assert_called_once()
-        resolver.resolve.assert_called_once_with(detections)
+        # The channel decides which response is even possible: a file at
+        # rest cannot be blocked in flight, a paste cannot be quarantined.
+        resolver.resolve.assert_called_once_with(detections, channel="CLIPBOARD")
         client.create_incident.assert_called_once()
         _, kwargs = client.create_incident.call_args
         assert kwargs["policy_id"] == "p1"

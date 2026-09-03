@@ -208,7 +208,7 @@ def _content_check_async(
     )
 
     policy = (
-        policy_resolver.resolve(detections)
+        policy_resolver.resolve(detections, channel="SCREENSHOT")
         if policy_resolver
         else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
     )
@@ -278,7 +278,7 @@ def _screenshot_loop(
                 "confidence": 0.6,
             }]
             policy = (
-                policy_resolver.resolve(detections)
+                policy_resolver.resolve(detections, channel="SCREENSHOT")
                 if policy_resolver
                 else {"id": _POLICY_ID, "action": "BLOCK", "name": None}
             )

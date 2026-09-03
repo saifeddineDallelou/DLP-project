@@ -109,7 +109,9 @@ class TestContentCheckAsync:
              patch("screenshot_monitor.pyperclip.copy") as mock_copy:
             screenshot_monitor._content_check_async(MagicMock(), "title", time.monotonic(), client, q, resolver)
 
-        resolver.resolve.assert_called_once_with(detections)
+        # The channel decides which response is even possible: a file at
+        # rest cannot be blocked in flight, a paste cannot be quarantined.
+        resolver.resolve.assert_called_once_with(detections, channel="SCREENSHOT")
         mock_copy.assert_not_called()
         policy, *_rest, cleared, _detections = q.get_nowait()
         assert policy["action"] == "ALLOW"

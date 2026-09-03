@@ -440,7 +440,7 @@ def _dialog_monitor_loop(
                     continue
 
                 policy = (
-                    policy_resolver.resolve(detections)
+                    policy_resolver.resolve(detections, channel="FILE_UPLOAD")
                     if policy_resolver
                     else {"id": None, "action": "BLOCK", "name": None}
                 )

@@ -65,6 +65,13 @@ class PolicyResolver:
                 # _matches_gate() / _detection_matches_patterns().
                 "patterns": [str(p).upper().replace(" ", "_") for p in (conditions.get("patterns") or [])],
                 "threshold": conditions.get("threshold") or 1,
+                # {"FILE": "QUARANTINE", "CLIPBOARD": "BLOCK"} -- the response
+                # for a given channel, where it differs from `action`.
+                "channelActions": {
+                    str(k).upper(): str(v).upper()
+                    for k, v in (policy.get("channelActions") or {}).items()
+                    if isinstance(v, str)
+                },
             }
             rule = conditions.get("complianceRule")
             if rule:
@@ -82,7 +89,7 @@ class PolicyResolver:
             f"{list(mapping)}"
         )
 
-    def resolve(self, detections: list[dict]) -> dict:
+    def resolve(self, detections: list[dict], channel: str | None = None) -> dict:
         """
         Return {"id", "action", "name"} for the policy matching the first
         (highest-priority) detection whose compliance rule has a configured
@@ -92,19 +99,45 @@ class PolicyResolver:
         A rule like "GDPR/loi-09-08" matches a policy tagged just "GDPR" --
         only the part before the slash is the compliance-framework name, the
         rest is a specific-law citation.
+
+        `channel` selects the response, because the right one depends on where
+        the data is moving and not only on what it is. A paste, a drag or a
+        file-picker selection is an action IN FLIGHT and can be stopped; a
+        file sitting in a watched folder is not doing anything, so there is
+        nothing to intercept and the only real response is to move it.
+
+        Omitting the channel keeps the policy's plain `action`, which is what
+        every caller did before this existed.
         """
         with self._lock:
             mapping = self._rule_to_policy
             default = self._default_policy
 
+        chosen = default
         for detection in detections:
             rule = detection.get("rule", "")
             base_rule = rule.split("/")[0]
             candidate = mapping.get(base_rule)
             if candidate and self._matches_gate(candidate, base_rule, detections):
-                return candidate
+                chosen = candidate
+                break
 
-        return default
+        return self._for_channel(chosen, channel)
+
+    @staticmethod
+    def _for_channel(policy: dict, channel: str | None) -> dict:
+        """The policy with `action` resolved for this channel.
+
+        A copy, never a mutation: the entries are shared cache state read from
+        several monitor threads, and rewriting `action` in place would leak
+        one channel's response into another's.
+        """
+        if not channel:
+            return policy
+        override = (policy.get("channelActions") or {}).get(str(channel).upper())
+        if not override or override == policy.get("action"):
+            return policy
+        return {**policy, "action": override, "actionSource": f"channel:{channel}"}
 
     @staticmethod
     def _matches_gate(candidate: dict, base_rule: str, detections: list[dict]) -> bool:

@@ -261,7 +261,9 @@ class TestProcess:
         f.write_text("4111111111111111")
         handler._process(str(f))
 
-        resolver.resolve.assert_called_once_with(detections)
+        # The channel decides which response is even possible: a file at
+        # rest cannot be blocked in flight, a paste cannot be quarantined.
+        resolver.resolve.assert_called_once_with(detections, channel="FILE")
         _, kwargs = client.create_incident.call_args
         assert kwargs["policy_id"] == "pci-dss-policy-id"
 

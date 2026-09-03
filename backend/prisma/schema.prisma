@@ -26,7 +26,20 @@ model Policy {
   name        String
   description String?
   conditions  Json
+  // The default response, used for any channel not named below.
   action      Action     @default(ALERT)
+  // Per-channel overrides: { "FILE": "QUARANTINE", "CLIPBOARD": "BLOCK" }.
+  //
+  // The right action depends on the CHANNEL, not only on the data. A paste,
+  // a drag or a file-picker selection is an action in flight and can be
+  // stopped; a file sitting in a watched folder is not doing anything, so
+  // there is nothing to intercept and the only real response is to move it.
+  //
+  // Without this, BLOCK on a file at rest silently did nothing but write an
+  // incident -- identical to ALERT -- while the log claimed action=BLOCK.
+  // Purview and Netskope model the same way: one policy for what is
+  // sensitive, then a response per location.
+  channelActions Json?   @map("channel_actions")
   severity    Severity   @default(MEDIUM)
   enabled     Boolean    @default(true)
   version     Int        @default(1)
