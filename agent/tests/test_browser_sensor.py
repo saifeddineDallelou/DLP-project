@@ -90,6 +90,22 @@ class TestReporting:
             STATE._reported_at -= (browser_sensor._REPORT_TTL + 1)
         assert STATE.current() == (None, "")
 
+    def test_health_distinguishes_no_ai_tab_from_no_extension(self, sensor):
+        # Both are `platform: null` on the wire. An operator checking whether
+        # the extension actually installed needs to tell them apart, and so
+        # does anyone debugging why nothing is being blocked.
+        with urllib.request.urlopen(f"{sensor}/health", timeout=3) as r:
+            before = json.loads(r.read())
+        assert before["extensionConnected"] is False
+        assert before["secondsSinceReport"] is None
+
+        post(sensor, {"platform": None, "detail": ""})
+        with urllib.request.urlopen(f"{sensor}/health", timeout=3) as r:
+            after = json.loads(r.read())
+        assert after["platform"] is None          # still no AI tab...
+        assert after["extensionConnected"] is True  # ...but something is watching
+        assert after["secondsSinceReport"] is not None
+
     def test_health_reports_what_it_currently_believes(self, sensor):
         post(sensor, {"platform": "ANTHROPIC_CLAUDE", "detail": "claude.ai"})
         with urllib.request.urlopen(f"{sensor}/health", timeout=3) as r:

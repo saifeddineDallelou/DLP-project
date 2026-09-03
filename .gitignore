@@ -36,3 +36,12 @@ Thumbs.db
 # EDM reference sets — salted digests of an organisation's real records.
 # Not raw data, but deployment state, and never something to commit.
 classifier/edm_store/
+
+# Browser-extension packaging artefacts.
+#
+# "Pack extension" produces a .crx and a .pem. The .pem is the PRIVATE KEY
+# that signs the extension's identity: anyone holding it can publish an
+# update that browsers accept as genuinely yours. It is never committed, and
+# it is not needed to develop -- "Load unpacked" runs the folder directly.
+*.crx
+*.pem

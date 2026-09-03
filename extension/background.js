@@ -47,7 +47,13 @@ const ENDPOINT = "http://127.0.0.1:8765/tab";
 
 // Re-sent even when nothing changed, so the agent can tell "no AI tab open"
 // from "the extension is gone". Silence has to mean something.
+//
+// The interval below only runs while the service worker is alive, and MV3
+// evicts it after roughly 30 seconds idle. chrome.alarms is what survives
+// that — and browsers clamp alarms to a 30-second floor, so asking for less
+// gets ignored or rejected, which is worse than asking for one that is kept.
 const HEARTBEAT_MS = 5000;
+const ALARM_MINUTES = 0.5;
 
 function platformFor(url) {
   let host;
@@ -93,9 +99,12 @@ async function report(force = false) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-  } catch {
-    // The agent isn't running. Not an error worth surfacing — the extension
-    // is a sensor, and a sensor with nobody listening just keeps sensing.
+  } catch (err) {
+    // Logged rather than swallowed. A sensor that cannot reach the agent
+    // looks exactly like one that is working, which is how an install gets
+    // called done when it is not — and the service-worker console is the
+    // only place anyone can find out otherwise.
+    console.warn("[DLP] could not reach the agent at", ENDPOINT, String(err));
     lastSent = null; // resend once it comes back
   }
 }
@@ -113,8 +122,13 @@ chrome.runtime.onInstalled.addListener(() => report(true));
 
 // MV3 service workers are evicted when idle; the alarm wakes this one so the
 // heartbeat keeps the agent's picture fresh.
-chrome.alarms.create("dlp-heartbeat", { periodInMinutes: 0.25 });
+chrome.alarms.create("dlp-heartbeat", { periodInMinutes: ALARM_MINUTES });
 chrome.alarms.onAlarm.addListener(() => report(true));
 
 setInterval(() => report(true), HEARTBEAT_MS);
-report(true);
+
+// Announce startup where an operator can actually see it. "No output at all"
+// is indistinguishable from "never loaded", and that ambiguity is what makes
+// a failed install hard to diagnose.
+report(true).then(() =>
+  console.log("[DLP] sensor started — reporting to", ENDPOINT));

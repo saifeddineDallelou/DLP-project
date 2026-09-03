@@ -96,6 +96,18 @@ class _SensorState:
                 return None, ""
             return self._platform, self._detail
 
+    def seconds_since_contact(self) -> float | None:
+        """How long since the extension last reported, or None if never.
+
+        Exposed because "installed, reporting no AI tab" and "not installed"
+        are the same `platform: null` on the wire, and an operator checking
+        whether the extension works needs to tell those apart.
+        """
+        with self._lock:
+            if not self._last_contact:
+                return None
+            return time.monotonic() - self._last_contact
+
     def is_live(self) -> bool:
         """Has the extension checked in recently?
 
@@ -141,7 +153,16 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             return self._json(404, {"error": "not found"})
         plat, detail = STATE.current()
-        self._json(200, {"status": "ok", "platform": plat, "detail": detail})
+        since = STATE.seconds_since_contact()
+        self._json(200, {
+            "status": "ok",
+            "platform": plat,
+            "detail": detail,
+            # The difference between "no AI tab is open" and "nothing is
+            # telling me about tabs at all".
+            "extensionConnected": STATE.is_live(),
+            "secondsSinceReport": None if since is None else round(since, 1),
+        })
 
     def _read_body(self) -> bytes:
         """Always consume the request body, whatever the answer will be.
