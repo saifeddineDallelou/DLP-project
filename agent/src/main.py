@@ -27,7 +27,9 @@ from app_launch_monitor import start_app_launch_monitor
 from file_dialog_monitor import start_file_dialog_monitor
 from app_file_monitor    import start_app_file_monitor
 from drag_drop_monitor  import start_drag_drop_monitor
+import browser_sensor
 from browser_sensor     import start_browser_sensor
+from upload_guard       import make_upload_check
 
 _STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -234,6 +236,13 @@ def main() -> None:
     # Not a monitor -- a listener. The browser extension reports which AI
     # tab is active, which is the one thing the window-title tiers cannot
     # see. Optional: without it the agent falls back to those tiers.
+    # The extension can see uploads the OS cannot: Opera's own recent-files
+    # panel never opens a Windows dialog, so file_dialog_monitor has nothing
+    # to find. The content script asks this before letting the page have the
+    # file.
+    browser_sensor.UPLOAD_CHECK = make_upload_check(
+        client, agent_id or "", policy_resolver,
+    )
     start_browser_sensor(stop)
     logger.info("[10/10] Drag-drop monitor started")
 

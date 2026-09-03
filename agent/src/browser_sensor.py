@@ -180,7 +180,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:         # noqa: N802
         raw = self._read_body()
 
-        if self.path != "/tab":
+        if self.path not in ("/tab", "/upload"):
             return self._json(404, {"error": "not found"})
 
         origin = self.headers.get("Origin", "")
@@ -188,6 +188,9 @@ class _Handler(BaseHTTPRequestHandler):
             # An ordinary web page must not be able to steer detection --
             # neither into blocking nor, more importantly, out of it.
             return self._json(403, {"error": "extension origin required"})
+
+        if self.path == "/upload":
+            return self._handle_upload(raw)
 
         try:
             body = json.loads(raw or b"{}")
@@ -209,6 +212,57 @@ class _Handler(BaseHTTPRequestHandler):
 
         STATE.record(platform, detail[:120])
         self._json(200, {"ok": True})
+
+    def _handle_upload(self, raw: bytes) -> None:
+        """Classify a file the user just picked inside the browser.
+
+        Some uploads never touch a Windows dialog at all. Opera draws its own
+        recent-files panel inside the browser window, so no dialog exists for
+        the file-dialog monitor to find and a sensitive file went straight up
+        -- the Explorer route blocked, the shortcut not.
+
+        Inside the page there IS something to see, which is why the answer
+        lives in the extension. This endpoint only classifies; the content
+        script is what actually stops the upload, because only it can, and
+        only before the page's own handler runs.
+        """
+        try:
+            body = json.loads(raw or b"{}")
+        except Exception:
+            return self._json(400, {"error": "invalid JSON"})
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "body must be an object"})
+
+        name = body.get("name")
+        text = body.get("text")
+        platform = body.get("platform")
+        if not isinstance(name, str) or not isinstance(text, str):
+            return self._json(400, {"error": "name and text must be strings"})
+
+        if UPLOAD_CHECK is None:
+            # No checker installed. Answering "block" would stop every upload
+            # in the browser on the strength of a missing wire-up; answering
+            # "allow" is the behaviour that existed before this endpoint.
+            logger.warning("[BROWSER-SENSOR] /upload called with no checker installed")
+            return self._json(200, {"block": False})
+
+        try:
+            block = bool(UPLOAD_CHECK(name[:260], text, str(platform or "")))
+        except Exception as exc:
+            # A classifier that is down must not wedge the browser: the page
+            # is waiting on this answer before it lets the user continue.
+            logger.error(f"[BROWSER-SENSOR] Upload check failed: {exc}")
+            return self._json(200, {"block": False})
+
+        self._json(200, {"block": block})
+
+
+# Set by the agent at startup: (filename, text, platform) -> bool, "block it?"
+#
+# A hook rather than an import, so this module stays a transport. It knows
+# about HTTP and about the extension; it has no opinion on what is sensitive,
+# and adding one here would put policy in two places.
+UPLOAD_CHECK = None
 
 
 def start_browser_sensor(stop: threading.Event, port: int = _DEFAULT_PORT):

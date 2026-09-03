@@ -70,3 +70,31 @@ talk its way in or out of a match through its title.
 
 Enforcement does not live here. The extension replaces a guess with a fact;
 the agent still decides what to do about it.
+
+## Upload guard
+
+The sensor reports which AI tab is active. The content script does something
+different: it stops a sensitive file being attached at all.
+
+That exists because some uploads never touch a Windows dialog. Opera draws its
+own recent-files panel inside the browser window -- click attach in ChatGPT and
+a list of recent downloads appears, already in the page -- so the agent's
+file-dialog monitor has nothing to find. A sensitive CSV uploaded that way went
+straight up while the same file picked through Explorer was blocked.
+
+Nothing outside the browser can see that. Inside it, the file is an ordinary
+`<input type="file">` change event, and a capture-phase listener sees it before
+the page's own handler does. That ordering is the point: once ChatGPT's script
+has read the File, the data is in its hands and clearing the input achieves
+nothing.
+
+**What it sends:** the filename and up to 5 KB of text, to `127.0.0.1:8765`
+only, and only for a file the user just chose to upload to an AI platform.
+Binary files are not read at all. Never page content, never browsing history.
+
+**If the agent is not running** the upload proceeds. Failing open is
+deliberate: this must not become the reason a browser cannot upload anything,
+and the agent's other channels still cover the OS routes.
+
+After editing the extension, reload it in `opera://extensions` -- a content
+script change needs the page reloaded too.

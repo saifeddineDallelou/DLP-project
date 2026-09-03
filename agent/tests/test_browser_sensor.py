@@ -172,3 +172,112 @@ class TestDeployment:
         stop.set()
         time.sleep(0.2)
         assert first is not None
+
+
+class TestUploadEndpoint:
+    """
+    The route the content script asks before letting a page have a file.
+
+    Some uploads never touch a Windows dialog: Opera draws its own
+    recent-files panel inside the browser window, so the file-dialog monitor
+    has nothing to find. Inside the page there IS something to see, so the
+    answer is asked for here.
+
+    This endpoint is a transport. It knows about HTTP and about the
+    extension, and has no opinion on what is sensitive -- putting policy here
+    would put it in two places.
+    """
+
+    def _upload(self, base, payload, origin=EXT_ORIGIN):
+        req = urllib.request.Request(
+            f"{base}/upload",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"Origin": origin} if origin else {})},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_a_sensitive_upload_is_blocked(self, sensor):
+        browser_sensor.UPLOAD_CHECK = lambda name, text, plat: True
+        try:
+            status, body = self._upload(sensor, {
+                "name": "cards.csv", "text": "4111", "platform": "OPENAI_CHATGPT"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert status == 200
+        assert body["block"] is True
+
+    def test_a_clean_upload_is_allowed(self, sensor):
+        browser_sensor.UPLOAD_CHECK = lambda name, text, plat: False
+        try:
+            _status, body = self._upload(sensor, {
+                "name": "notes.txt", "text": "hello", "platform": "OPENAI_CHATGPT"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert body["block"] is False
+
+    def test_the_checker_receives_what_was_picked(self, sensor):
+        seen = {}
+
+        def _check(name, text, plat):
+            seen.update(name=name, text=text, plat=plat)
+            return False
+
+        browser_sensor.UPLOAD_CHECK = _check
+        try:
+            self._upload(sensor, {"name": "cards.csv", "text": "4111",
+                                  "platform": "OPENAI_CHATGPT"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert seen == {"name": "cards.csv", "text": "4111", "plat": "OPENAI_CHATGPT"}
+
+    def test_an_ordinary_page_cannot_ask(self, sensor):
+        # A web page must not be able to steer this -- neither into blocking
+        # nor, more importantly, out of it.
+        browser_sensor.UPLOAD_CHECK = lambda *a: True
+        try:
+            status, _ = self._upload(sensor, {"name": "x", "text": "y"},
+                                     origin="https://evil.example")
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert status == 403
+
+    def test_a_missing_checker_fails_open(self, sensor):
+        # Answering "block" would stop every upload in the browser on the
+        # strength of a missing wire-up.
+        browser_sensor.UPLOAD_CHECK = None
+        status, body = self._upload(sensor, {"name": "x", "text": "y"})
+        assert status == 200
+        assert body["block"] is False
+
+    def test_a_checker_that_raises_fails_open(self, sensor):
+        # The page is waiting on this answer before the user can continue; a
+        # crash must not hang the browser.
+        def _boom(*_a):
+            raise RuntimeError("classifier down")
+
+        browser_sensor.UPLOAD_CHECK = _boom
+        try:
+            _status, body = self._upload(sensor, {"name": "x", "text": "y"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert body["block"] is False
+
+    def test_a_malformed_body_is_rejected(self, sensor):
+        browser_sensor.UPLOAD_CHECK = lambda *a: True
+        try:
+            status, _ = self._upload(sensor, {"name": 42, "text": "y"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert status == 400
+
+    def test_the_tab_route_still_works(self, sensor):
+        # Adding a route must not break the one the sensor already had.
+        status, _ = post(sensor, {"platform": "GROK", "detail": "grok.com"})
+        assert status == 200
+        assert STATE.current()[0] == "GROK"

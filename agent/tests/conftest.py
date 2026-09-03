@@ -25,3 +25,23 @@ def _reset_repeat_windows():
         if isinstance(window, repeat_window.RepeatWindow):
             window.__init__(window._cooldown)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_browser_sensor_state():
+    """Forget what the extension last reported.
+
+    STATE is process-wide because a real agent has one browser sensor. In a
+    test process it leaks: the sensor's own tests set a platform, and the
+    file-dialog tests -- which now consult the sensor before falling back to
+    the address bar -- then found a platform already reported and never
+    reached the fallback they exist to test. They passed alone and failed
+    together, which is the worst way for a test to be wrong.
+    """
+    import browser_sensor
+
+    browser_sensor.STATE.record(None, "")
+    with browser_sensor.STATE._lock:
+        browser_sensor.STATE._last_contact = 0.0
+    yield
+

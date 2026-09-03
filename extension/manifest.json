@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DLP Browser Sensor",
   "version": "1.0.0",
-  "description": "Tells the local DLP agent which AI platform tab is active. Reports a platform name only \u2014 never page content, keystrokes or browsing history.",
+  "description": "Tells the local DLP agent which AI platform tab is active, and stops sensitive files being attached to one. Reports a platform name and, for a file the user chooses to upload, its name and text \u2014 never page content, keystrokes or browsing history.",
   "permissions": [
     "tabs",
     "alarms"
@@ -12,5 +12,32 @@
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://*.openai.com/*",
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://bard.google.com/*",
+        "https://copilot.microsoft.com/*",
+        "https://*.perplexity.ai/*",
+        "https://grok.com/*",
+        "https://*.x.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://chat.mistral.ai/*",
+        "https://www.meta.ai/*",
+        "https://poe.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
 }

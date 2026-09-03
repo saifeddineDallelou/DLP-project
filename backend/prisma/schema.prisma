@@ -291,6 +291,15 @@ enum IncidentStatus {
 
 enum Channel {
   FILE
+  // A file being sent somewhere: dragged onto a page, chosen in a picker, or
+  // attached from a browser's own recent-files panel.
+  //
+  // The policy layer has named this channel since per-channel responses
+  // existed -- it is what separates "a file sitting in a watched folder",
+  // which can only be quarantined, from "a file in flight", which can be
+  // stopped. The enum simply never caught up, so the first code to record an
+  // upload incident failed at the database with the block already applied.
+  FILE_UPLOAD
   CLIPBOARD
   USB
   PRINT

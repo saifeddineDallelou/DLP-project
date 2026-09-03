@@ -457,3 +457,44 @@ describe('counting repeats instead of filing rows', () => {
     expect(after.attempts).toBe(9);
   });
 });
+
+describe('a file in flight is its own channel', () => {
+  // The policy layer has named FILE_UPLOAD since per-channel responses
+  // existed, but the Channel enum never caught up -- so the first code to
+  // record an upload incident failed at the database with the block already
+  // applied. The user was stopped and nothing was written down, which is the
+  // worst shape of failure available.
+
+  test('an upload incident is accepted', async () => {
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    const res = await request(app).post('/api/incidents')
+      .set('x-agent-token', agent.token)
+      .send({
+        agentId: agent.id, policyId: policy.id, severity: 'HIGH',
+        channel: 'FILE_UPLOAD', riskScore: 1,
+        evidence: 'cards.csv [in-page upload to OPENAI_CHATGPT]',
+        actionTaken: 'BLOCK',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.channel).toBe('FILE_UPLOAD');
+    expect(res.body.evidence).toContain('cards.csv');
+  });
+
+  test('it is distinct from a file at rest', async () => {
+    // FILE means "sitting in a watched folder", which can only be
+    // quarantined. Collapsing the two would give an in-flight block the
+    // semantics of a file move.
+    const agent = await createAgent();
+    const policy = await createPolicy();
+    for (const channel of ['FILE', 'FILE_UPLOAD']) {
+      await request(app).post('/api/incidents')
+        .set('x-agent-token', agent.token)
+        .send({ agentId: agent.id, policyId: policy.id, severity: 'HIGH', channel });
+    }
+
+    const rows = await prisma.incident.findMany({ where: { policyId: policy.id } });
+    expect(rows.map((r) => r.channel).sort()).toEqual(['FILE', 'FILE_UPLOAD']);
+  });
+});
