@@ -763,3 +763,247 @@ class TestWindowOwnerPids:
 
     def test_empty_window_list_returns_empty_set(self):
         assert aidm._window_owner_pids([]) == set()
+
+
+class TestRenamedAiTab:
+    """
+    ChatGPT rewrites document.title to the conversation topic the moment you
+    send it a message, so "ChatGPT - Opera" becomes "Food advice - Opera".
+
+    The address-bar reader exists to survive that. On Opera it cannot: the
+    whole window exposes seven accessibility nodes and not one Edit control,
+    so there is no address bar to read. Measured on a real machine, not
+    assumed -- _detect_platform_via_address_bar returned None and
+    descendants(control_type="Edit") returned zero.
+
+    Left there, the agent could see a ChatGPT tab only BEFORE anyone had
+    talked to it, which is the one state it is never in when a person
+    actually pastes customer data into it. The window HANDLE does not change
+    when the title does, so a window that identified itself once is
+    remembered.
+    """
+
+    def _blocker(self):
+        client = MagicMock()
+        client.report_ai_leak_attempt.return_value = {"id": "a1"}
+        return AiBlocker(client, "agent-1")
+
+    def test_a_tab_that_renames_itself_is_still_found(self):
+        b = self._blocker()
+        fresh = [(500, "ChatGPT - Opera")]
+        renamed = [(500, "Food advice - Opera")]   # same hwnd, new title
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=fresh), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            assert b._detect_platform()[0] == "OPENAI_CHATGPT"
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=renamed), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert plat == "OPENAI_CHATGPT"
+        # The source has to say which tier answered -- an incident that claims
+        # a title match when it was a recollection is a lie to whoever
+        # investigates it.
+        assert source.startswith("remembered=")
+        assert "''" not in source          # quoting, not doubled quoting
+
+    def test_a_window_never_seen_as_ai_is_not_invented(self):
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "Food advice - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            assert b._detect_platform()[0] is None
+
+    def test_closing_the_window_forgets_it_immediately(self):
+        # Not on a timer: Windows reuses handles, and an entry outliving its
+        # window would hand an AI identity to whatever got the number next.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            b._detect_platform()
+        assert 500 in b._ai_windows
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(999, "Notepad")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            plat, _ = b._detect_platform()
+
+        assert plat is None
+        assert b._ai_windows == {}
+
+    def test_a_reused_handle_does_not_inherit_the_identity(self):
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            b._detect_platform()
+
+        # The window closes and is gone for one scan...
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            b._detect_platform()
+
+        # ...then Windows hands 500 to something else entirely.
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "Payroll.xlsx - Excel")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            assert b._detect_platform()[0] is None
+
+    def test_the_memory_expires_if_the_window_is_navigated_away(self):
+        # The window stays open but is no longer an AI platform. Pruning by
+        # existence cannot catch that, so the TTL bounds it.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            b._detect_platform()
+
+        with b._lock:
+            plat, seen, seen_as = b._ai_windows[500]
+            b._ai_windows[500] = (plat, seen - (aidm._AI_WINDOW_MEMORY_TTL + 1), seen_as)
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "Company intranet - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None), \
+             patch("ai_domain_monitor._scan_processes_raw", return_value=[]):
+            assert b._detect_platform()[0] is None
+
+    def test_a_live_title_match_still_wins_over_a_recollection(self):
+        # Attribution matters: if a window is announcing itself right now,
+        # that is the platform to name, not one we happen to remember.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            b._detect_platform()
+
+        windows = [(500, "Food advice - Opera"), (600, "Claude - Opera")]
+        with patch("ai_domain_monitor._enum_all_windows", return_value=windows), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert plat == "ANTHROPIC_CLAUDE"
+        assert source.startswith("window=")
+
+    def test_the_foreground_tab_is_remembered_even_when_another_matched(self):
+        # The focused tab is the one being pasted into. It must be recorded in
+        # its own right, or a rename would fall back to whatever else matched.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(500, "ChatGPT - Opera")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert source.startswith("foreground=")
+        assert b._ai_windows[500][0] == "OPENAI_CHATGPT"
+
+    def test_the_evidence_names_the_tab_that_identified_itself(self):
+        """A browser runs every tab in one window, so at block time the title
+        is whatever tab is in front -- not the AI one.
+
+        Observed live: a block correctly attributed to ChatGPT recorded its
+        evidence as "DLP Console - Opera", the dashboard tab. The incident
+        has to say where the data was going.
+        """
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+
+        # Same window, user has switched to another tab.
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "DLP Console - Opera")]),              patch("ai_domain_monitor._get_foreground_window", return_value=(0, "")),              patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert plat == "OPENAI_CHATGPT"
+        assert "ChatGPT - Opera" in source        # where it was going
+        assert "DLP Console - Opera" in source    # where the user is now
+
+    def test_a_later_sighting_does_not_overwrite_the_identifying_title(self):
+        # Observation runs every second. A refresh must not replace
+        # "ChatGPT - Opera" with whatever tab is in front at the time.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "Claude - Opera")]):
+            b.observe_ai_windows()
+
+        # Different platform -> a genuinely new identification, so it updates.
+        assert b._ai_windows[500][0] == "ANTHROPIC_CLAUDE"
+        assert b._ai_windows[500][2] == "Claude - Opera"
+
+    def test_observation_happens_without_anything_to_block(self):
+        """The reason the first attempt at this fix changed nothing.
+
+        _detect_platform only runs once the clipboard has already been
+        flagged. A memory populated only there learns a window's identity at
+        the exact moment that knowledge is no longer available -- the tab has
+        been renamed by then. Observation has to be unconditional.
+        """
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows",
+                   return_value=[(500, "ChatGPT - Opera"), (600, "Notepad")]):
+            b.observe_ai_windows()
+
+        assert b._ai_windows[500][0] == "OPENAI_CHATGPT"
+        assert 600 not in b._ai_windows
+
+    def test_observed_then_renamed_still_blocks(self):
+        # End to end, the live sequence: seen while it announced itself,
+        # renamed, then something sensitive is copied.
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "Fight advice - Opera")]), \
+             patch("ai_domain_monitor._get_foreground_window", return_value=(500, "Fight advice - Opera")), \
+             patch("ai_domain_monitor._detect_platform_via_address_bar", return_value=None):
+            plat, source = b._detect_platform()
+
+        assert plat == "OPENAI_CHATGPT"
+        assert source.startswith("remembered=")
+
+    def test_the_poll_loop_observes_every_iteration(self):
+        # Guards the WIRING, not just the method: the call must sit outside
+        # the clipboard_flagged_recently gate, or it only ever runs when
+        # there is already something to block -- which is too late.
+        #
+        # The loop is stopped from its own wait rather than from the call
+        # under test, so removing that call fails this fast instead of
+        # hanging the suite.
+        state = MagicMock()
+        state.clipboard_flagged_recently.return_value = False   # nothing to block
+        stop = threading.Event()
+        blocker = MagicMock()
+
+        calls = {"n": 0}
+        real_wait = stop.wait
+
+        def bounded_wait(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                stop.set()
+            return real_wait(0)
+
+        with patch.object(stop, "wait", bounded_wait):
+            _ai_monitor_loop("agent-1", state, stop, blocker)
+
+        assert blocker.observe_ai_windows.call_count >= 1
+        blocker.check_and_block.assert_not_called()
+
+    def test_observation_prunes_closed_windows(self):
+        b = self._blocker()
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(500, "ChatGPT - Opera")]):
+            b.observe_ai_windows()
+        assert 500 in b._ai_windows
+
+        with patch("ai_domain_monitor._enum_all_windows", return_value=[(600, "Notepad")]):
+            b.observe_ai_windows()
+        assert b._ai_windows == {}

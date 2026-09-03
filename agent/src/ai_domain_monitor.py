@@ -40,6 +40,29 @@ _ALERT_COOLDOWN      = 60.0  # min seconds between API reports per platform
 _CLIP_CLEAR_COOLDOWN = 5.0   # min seconds between clipboard overwrites
 _PROC_CACHE_TTL      = 2.0   # cache process-list scan for 2 s (called from 2 threads)
 _URL_CACHE_TTL       = 2.0   # cache address-bar scan for 2 s -- UI Automation is slow
+
+# How long a browser window stays known as an AI platform after its title
+# stopped saying so.
+#
+# ChatGPT rewrites document.title to the conversation topic the moment you
+# send a message: "ChatGPT - Opera" becomes "Food advice - Opera". The
+# address-bar reader exists to survive that, and on some browsers it does not
+# work at all -- Opera exposes SEVEN accessibility nodes for its whole window
+# and not one Edit control, so there is no address bar to read. Measured, not
+# assumed: _detect_platform_via_address_bar returned None, descendants(
+# control_type="Edit") returned zero.
+#
+# That left the agent able to see a ChatGPT tab only BEFORE anyone had talked
+# to it -- the one state it is never in when a person actually pastes
+# customer data into it.
+#
+# The window handle does not change when the title does. So a window that
+# announced itself as an AI platform is remembered as one. The memory is
+# dropped as soon as the window closes; this timer only bounds the other case,
+# where the window is still open but has been navigated somewhere else
+# entirely. Fifteen minutes is well past a paste and well short of a
+# work session.
+_AI_WINDOW_MEMORY_TTL = 900.0
 _LOG_STATUS_EVERY    = 10    # log AI status every N polls (= every 10 s)
 
 # ── AI-platform keyword tables ────────────────────────────────────────────────
@@ -314,12 +337,97 @@ class AiBlocker:
         self._proc_cache: tuple[str | None, str] = (None, "")
         self._proc_cache_time: float              = 0.0
 
+        # hwnd -> (platform, monotonic time last confirmed, title AT THAT TIME).
+        #
+        # A browser window that once identified itself as an AI platform stays
+        # known as one after its title changes. See _AI_WINDOW_MEMORY_TTL for
+        # why this is not optional on some browsers.
+        #
+        # The original title is kept because the CURRENT one is worthless as
+        # evidence: a browser runs every tab in one window, so at block time
+        # the title is whatever tab happens to be in front. Observed live --
+        # a block correctly attributed to ChatGPT recorded its evidence as
+        # "DLP Console - Opera", the dashboard tab. An incident naming the
+        # wrong destination is worse than useless to whoever investigates it.
+        self._ai_windows: dict[int, tuple[str, float, str]] = {}
+
         # Browser address-bar scan cache (UI Automation is much slower than
         # the window-title/process checks, so this tier is cached separately)
         self._url_cache: tuple[str, str] | None = None
         self._url_cache_time: float             = 0.0
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _remember_ai_window(self, hwnd: int, platform: str, title: str = "") -> None:
+        """Record that this window IS an AI platform, however we found out.
+
+        `title` is what it was called at the moment it identified itself --
+        the only title that is evidence of anything later on.
+        """
+        if not hwnd:
+            return
+        with self._lock:
+            previous = self._ai_windows.get(hwnd)
+            # Keep the first title that identified it: "ChatGPT - Opera" says
+            # where the data was going; a later refresh from a background scan
+            # would overwrite it with whatever tab is in front now.
+            seen_as = (previous[2] if previous and previous[0] == platform
+                       else (title or "")) or title
+            self._ai_windows[hwnd] = (platform, time.monotonic(), seen_as)
+
+    def _recall_ai_window(self, windows: list[tuple[int, str]]) -> tuple[str, str] | None:
+        """
+        An open window we previously identified as an AI platform.
+
+        Also prunes: an entry whose window has closed is dropped immediately
+        rather than waiting out the TTL, so a handle Windows later reuses for
+        something unrelated cannot inherit an AI identity.
+        """
+        live = {h: t for h, t in windows}
+        now = time.monotonic()
+        recalled: tuple[str, str] | None = None
+
+        with self._lock:
+            for hwnd in list(self._ai_windows):
+                platform, seen, seen_as = self._ai_windows[hwnd]
+                if hwnd not in live or now - seen > _AI_WINDOW_MEMORY_TTL:
+                    del self._ai_windows[hwnd]
+                elif recalled is None:
+                    # Report the title it identified itself BY, and the one it
+                    # wears now, so the incident says where the data was going
+                    # without pretending the window still announces it.
+                    current = live[hwnd]
+                    evidence = (f"'{seen_as}' (now '{current}')"
+                                if seen_as and seen_as != current
+                                else f"'{current}'")
+                    recalled = (platform, evidence)
+
+        return recalled
+
+    def observe_ai_windows(self) -> None:
+        """
+        Note which windows are AI platforms, from their titles alone.
+
+        Called every poll, whether or not anything is being blocked. That is
+        the whole point: _detect_platform only runs once the clipboard has
+        already been flagged, so a memory populated only there would never see
+        a ChatGPT tab during the minutes of ordinary browsing BEFORE it gets
+        renamed -- it would learn the window's identity at the exact moment
+        that knowledge stopped being available. Which is what happened, live:
+        the fix looked correct and changed nothing.
+
+        Costs a window enumeration -- 0.24 ms measured, against a 1 s poll. It
+        deliberately does no UI Automation and no process scan; those are the
+        expensive tiers the caller is right to gate.
+        """
+        windows = _enum_all_windows()
+        for hwnd, title in windows:
+            plat = _detect_platform_in_text(title)
+            if plat:
+                self._remember_ai_window(hwnd, plat, title)
+        # Drops entries whose window has closed, so the memory cannot grow
+        # unbounded across a long session.
+        self._recall_ai_window(windows)
 
     def _detect_platform(self) -> tuple[str | None, str]:
         """
@@ -330,7 +438,11 @@ class AiBlocker:
              -- catches an AI tab whose page JS has renamed the title away
              from anything platform-shaped (e.g. ChatGPT retitling its tab
              to the conversation topic once you start chatting).
-          3. Running-process name match (cached 2 s) -- catches a desktop
+          3. A window we ALREADY identified, whose title has since changed
+             (dictionary lookup) -- catches ChatGPT renaming its tab to the
+             conversation topic, which is the state the tab is in whenever
+             someone actually pastes something into it.
+          4. Running-process name match (cached 2 s) -- catches a desktop
              app with no matching window title at all.
         """
         windows = _enum_all_windows()
@@ -353,6 +465,7 @@ class AiBlocker:
         if fg_title:
             fg_plat = _detect_platform_in_text(fg_title)
             if fg_plat:
+                self._remember_ai_window(fg_hwnd, fg_plat, fg_title)
                 return fg_plat, f"foreground='{fg_title[:80]}'"
 
             # ChatGPT renames its tab to the conversation topic as soon as you
@@ -365,12 +478,26 @@ class AiBlocker:
             if _is_browser_window(fg_title):
                 fg_url_plat = _detect_platform_via_address_bar(fg_hwnd)
                 if fg_url_plat:
+                    self._remember_ai_window(fg_hwnd, fg_url_plat, fg_title)
                     return fg_url_plat, f"foreground-url='{fg_title[:80]}'"
 
-        for _hwnd, title in windows:
+        for hwnd, title in windows:
             plat = _detect_platform_in_text(title)
             if plat:
+                self._remember_ai_window(hwnd, plat, title)
                 return plat, f"window='{title[:80]}'"
+
+        # A window we identified earlier, whose title has since changed.
+        #
+        # Deliberately ahead of the address-bar and process tiers: it is a
+        # dictionary lookup rather than a UI Automation walk, and it is the
+        # case those tiers were supposed to cover and cannot on every browser.
+        remembered = self._recall_ai_window(windows)
+        if remembered:
+            # The evidence arrives already quoted -- it may name two titles,
+            # the one that identified the window and the one it wears now.
+            plat, evidence = remembered
+            return plat, f"remembered={evidence[:120]}"
 
         now = time.monotonic()
         with self._lock:
@@ -381,6 +508,7 @@ class AiBlocker:
                 if _is_browser_window(title):
                     plat = _detect_platform_via_address_bar(hwnd)
                     if plat:
+                        self._remember_ai_window(hwnd, plat, title)
                         found = (plat, title)
                         break
             with self._lock:
@@ -723,6 +851,16 @@ def _ai_monitor_loop(
             logger.debug(
                 f"[AI-MONITOR] Status | poll=#{poll_num} | fg='{fg[:70]}'"
             )
+
+        # Note any AI window that is currently ANNOUNCING itself, every poll.
+        #
+        # This has to happen unconditionally, not inside the gate below. A
+        # ChatGPT tab is identifiable by title only until you send it a
+        # message, and the gate opens only after something sensitive is
+        # already on the clipboard -- by which time the tab has usually been
+        # renamed and there is nothing left to learn from. Cheap on purpose:
+        # a window enumeration, no UI Automation, no process scan.
+        blocker.observe_ai_windows()
 
         # Only do expensive detection if clipboard was recently flagged
         if state.clipboard_flagged_recently(within_seconds=30.0):
