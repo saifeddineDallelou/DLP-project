@@ -11,7 +11,7 @@ The system is built from four independent components:
 |---|---|---|
 | [`classifier/`](#classifier--detection-engine) | Python, FastAPI | Decides **what is sensitive**. Stateless content-scanning microservice. |
 | [`backend/`](#backend--control-plane) | Node, Express, Prisma, PostgreSQL | Decides **what the rules are**. Stores policies, incidents, agents, behaviour data. |
-| [`agent/`](#agent--windows-endpoint-monitor) | Python | Decides **when to act**. Runs on the endpoint, watches 9 leak channels, enforces the action. |
+| [`agent/`](#agent--windows-endpoint-monitor) | Python | Decides **when to act**. Runs on the endpoint, watches 11 leak channels, enforces the action. |
 | [`frontend/`](#frontend--admin-dashboard) | React, Vite, Tailwind | Where a human **sees and configures** all of it. |
 | [`extension/`](#extension--browser-sensor) | Chrome MV3 | Tells the agent **which AI tab is active**. Optional; the agent falls back to window titles without it. |
 
@@ -146,7 +146,7 @@ npm test                                       # 297 tests, 17 suites
 
 ### `agent/` — Windows endpoint monitor
 
-The enforcement point. `src/main.py` enrolls the endpoint, then starts nine
+The enforcement point. `src/main.py` enrolls the endpoint, then starts twelve
 monitor threads that each cover a distinct leak channel. Every module carries a
 docstring explaining the vector it covers and its known gaps.
 
@@ -162,6 +162,12 @@ docstring explaining the vector it covers and its known gaps.
 | `app_launch_monitor.py` | Launches of watchlisted exfiltration tools |
 | `app_file_monitor.py` | Restricted apps holding an already-flagged file |
 | `drag_drop_monitor.py` | Dragging a file from Explorer onto an AI page — no clipboard, no dialog |
+| `upload_guard.py` | Uploads picked inside the browser's own panel, which open no Windows dialog at all |
+| `usb_monitor.py` | Files copied to removable media, and the drive insert itself |
+| `print_monitor.py` | Spooled print jobs — paused, judged, then released or cancelled |
+| `upload_guard.py` | Uploads picked inside the browser's own panel, which open no Windows dialog at all |
+| `usb_monitor.py` | Files copied to removable media, and the drive insert itself |
+| `print_monitor.py` | Spooled print jobs — paused, judged, then released or cancelled |
 
 **Decision and enforcement**
 
@@ -171,6 +177,10 @@ docstring explaining the vector it covers and its known gaps.
 | `app_rule_resolver.py` | Is the current destination a restricted app? |
 | `quarantine.py` | Moves the source file out of reach — what makes QUARANTINE differ from BLOCK |
 | `review_prompt.py` | Post-block dialog letting the user request an admin review |
+| `repeat_window.py` | Is this the same thing again, or a new leak? Keyed on content, never on time |
+| `title_heuristic.py` | Name-based judgement for the two channels with no readable content |
+| `repeat_window.py` | Is this the same thing again, or a new leak? Keyed on content, never on time |
+| `title_heuristic.py` | Name-based judgement for the two channels with no readable content |
 
 **Support**
 
@@ -187,7 +197,7 @@ cd agent
 pip install -r requirements.txt
 cp .env.example .env                           # then edit WATCH_DIRS
 python src/main.py
-python -m pytest -q                            # 410 tests
+python -m pytest -q                            # 583 tests
 ```
 
 **Data-at-rest discovery.** Every monitor above reacts to *activity*. None of
@@ -251,15 +261,75 @@ Configuration lives in `.env` files per component; each has a committed
 ## Tests
 
 ```bash
-cd backend    && npm test            # 297
-cd agent      && python -m pytest -q # 431
+cd backend    && npm test            # 311
+cd agent      && python -m pytest -q # 583
 cd classifier && python -m pytest -q # 106
-cd frontend   && npm test            # 121
+cd frontend   && npm test            # 132
 ```
 
 Run locally before pushing. Note that the agent suite is **Windows-only** — it
 imports `ctypes.wintypes`, `pywinauto` and `tkinter`, so it cannot even be
 collected on Linux or macOS.
+
+## What this does not do
+
+Every control here has an edge, and the edges matter more than the features
+when someone is deciding whether to rely on it.
+
+**There is no network channel.** `NETWORK` is a value the `Channel` enum
+accepts and nothing produces. Seeing data leave over HTTPS means terminating
+TLS at a proxy or shipping a filter driver, neither of which is in scope for a
+user-mode agent. The dashboard no longer offers or charts the channel, because
+a row of permanent zeroes reads as "nothing happened here" rather than
+"nothing watches this".
+
+**USB enforcement is after the fact.** Windows does not let a user-mode
+process veto a file write; that needs a signed filesystem filter driver. The
+agent sees the file land and takes it back off the volume within roughly a
+second. A drive pulled out inside that second keeps the data. The incident
+says REMOVED, never "blocked", because those are different claims.
+
+**A print job is judged by its name unless the name resolves to a file.** The
+spooled job is the driver's own render -- EMF, PostScript, a vendor blob --
+and reading it means shipping a print processor. Notepad and most viewers
+submit the real path, and then the file's content is classified like any other
+content. Everything else falls back to the title heuristic, at the lower
+confidence a name deserves, and the incident records which of the two decided.
+
+**Screenshots are caught via the clipboard.** A capture tool that writes
+straight to disk without ever touching the clipboard is not seen. The
+keyboard-hook fallback is best-effort: Windows 10/11 handle `PrtScn` and
+`Win+Shift+S` in the Shell before any user-mode hook runs, and administrator
+rights do not change that.
+
+**In-page uploads need the browser extension.** Opera and Chrome draw their
+own recent-files panels inside the page, where no Windows dialog exists to
+intercept. Only the extension can see those, and only on browsers where it is
+installed. Without it, that route is uncovered -- the OS file-picker route
+still is not.
+
+**Detection is patterns, dictionaries and exact-data matching -- not a model.**
+It recognises what it has been told to recognise. Novel formats and
+paraphrased sensitive text pass; unusual-looking benign strings occasionally
+do not.
+
+**The agent runs as the user, with no tamper protection.** Anyone who can open
+Task Manager can end it. Making that hard means a Windows service, a
+protected process and an installer -- a different piece of software.
+
+**Components talk over plain HTTP on loopback.** Fine on one endpoint, not a
+deployment model. There is no TLS between agent, backend and classifier, and
+no certificate pinning.
+
+**It has been run on one machine.** Everything below has been exercised live
+on a single Windows 11 workstation. Nothing here has met a fleet, a domain, a
+roaming profile, or two agents reporting at once.
+
+**The USB channel's drive detection has not met a physical stick.** The Win32
+enumeration is verified against real hardware -- `C:` correctly reports as
+fixed, capacity reads back -- and the scan, classify and enforcement path is
+verified end to end against the live services. The one step not yet exercised
+with real hardware is a removable volume actually appearing.
 
 ## Repository conventions
 
