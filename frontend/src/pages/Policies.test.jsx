@@ -92,6 +92,37 @@ describe('Policies page', () => {
     expect(screen.getByLabelText(/file at rest action/i)).toHaveValue('');
   });
 
+  test('offers the channels that now have monitors behind them', async () => {
+    // USB and PRINT were in the schema, on the Reports page and worth 20% of
+    // every UEBA risk score long before anything implemented them. Offering a
+    // response for a channel nothing watches is a promise the agent cannot
+    // keep -- so they appear here only now that they are enforced.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+
+    expect(screen.getByLabelText(/removable media action/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/print action/i)).toBeInTheDocument();
+  });
+
+  test('removable media and print cannot be set to quarantine', async () => {
+    // Neither is a file at rest: a copy on a stick is taken back off the
+    // volume and a spooled job is cancelled. Quarantine has nothing to move.
+    const user = userEvent.setup();
+    api.get.mockResolvedValue({ data: [] });
+    render(<Policies />);
+
+    await user.click(await screen.findByRole('button', { name: /new policy|create first/i }));
+
+    for (const label of [/removable media action/i, /print action/i]) {
+      const options = [...screen.getByLabelText(label).options].map(o => o.value);
+      expect(options).not.toContain('QUARANTINE');
+      expect(options).toContain('BLOCK');
+    }
+  });
+
   test('only offers responses a channel can actually carry out', async () => {
     // A file already at rest has nothing in flight to stop, and a paste
     // cannot be moved to a quarantine folder. Offering the impossible option

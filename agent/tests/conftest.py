@@ -19,7 +19,8 @@ def _reset_repeat_windows():
     """
     import repeat_window
 
-    for module_name in ("drag_drop_monitor", "file_dialog_monitor", "screenshot_monitor"):
+    for module_name in ("drag_drop_monitor", "file_dialog_monitor", "screenshot_monitor",
+                        "upload_guard", "usb_monitor", "print_monitor"):
         module = sys.modules.get(module_name)
         window = getattr(module, "_REPEATS", None) if module else None
         if isinstance(window, repeat_window.RepeatWindow):

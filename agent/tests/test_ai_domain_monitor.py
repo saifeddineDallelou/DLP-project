@@ -8,11 +8,26 @@ import ai_domain_monitor as aidm
 from ai_domain_monitor import AiBlocker, _detect_platform_in_text, _is_browser_window, _ai_monitor_loop
 
 
-def _join_report_threads(timeout=2):
-    """Reporting runs on a daemon thread, so assertions about it must wait."""
-    for t in threading.enumerate():
-        if t.name in ("ai-monitor-report", "review-prompt"):
-            t.join(timeout=timeout)
+def _join_report_threads(timeout=5):
+    """Reporting runs on a daemon thread, so assertions about it must wait.
+
+    One snapshot of threading.enumerate() is not enough. The report thread is
+    what SPAWNS the review-prompt thread, so a prompt thread that does not
+    exist yet when the snapshot is taken is never waited for -- the `with
+    patch(...)` block then exits, the real prompt function is restored, and
+    the test asserts against a popup the mock never saw. That failed only
+    under load, which is the worst way for a test to be wrong.
+
+    Re-snapshot until none of these threads are left, or the deadline passes.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        alive = [t for t in threading.enumerate()
+                 if t.name in ("ai-monitor-report", "review-prompt")]
+        if not alive:
+            return
+        for t in alive:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
 
 @pytest.fixture(autouse=True)
 def _clipboard_holds_sensitive_content():

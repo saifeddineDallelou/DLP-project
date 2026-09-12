@@ -30,6 +30,10 @@ const CHANNELS = [
     actions: ['ALLOW', 'ALERT', 'BLOCK'] },
   { key: 'SCREENSHOT',  label: 'Screenshot',       hint: 'Screen capture while sensitive content is visible',
     actions: ['ALLOW', 'ALERT', 'BLOCK'] },
+  { key: 'USB',         label: 'Removable media',  hint: 'Copied to a USB drive — the copy is taken back off the volume',
+    actions: ['ALLOW', 'ALERT', 'BLOCK'] },
+  { key: 'PRINT',       label: 'Print',            hint: 'Sent to a printer — the spooled job is held, then cancelled',
+    actions: ['ALLOW', 'ALERT', 'BLOCK'] },
   { key: 'FILE',        label: 'File at rest',     hint: 'Found in a watched folder — nothing in flight to stop',
     actions: ['ALLOW', 'ALERT', 'QUARANTINE'] },
 ];

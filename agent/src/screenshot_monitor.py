@@ -85,39 +85,20 @@ except ImportError:
     )
     _OCR_AVAILABLE = False
 
-# Window title substrings that classify a screenshot as sensitive. This is a
-# heuristic on the title text, not real content classification -- a
-# screenshot has no extractable text the way a file/clipboard payload does,
-# so there's no classifier engine call here. Widen this list as needed.
-_SENSITIVE_KEYWORDS = frozenset({
-    "confidential", "client", "customer", "salary", "payroll",
-    "ssn", "iban", "carte", "bancaire",
-    "password", "secret", "dlp",
-    "invoice", "contract", "budget",
-    "personal", "private", "restricted", "internal",
-    "bank", "account", "tax", "medical",
-})
-
-# Office file title format: "report_client.xlsx - Microsoft Excel"
-_SENSITIVE_FILENAME_KW = frozenset({
-    "client", "customer", "confidential", "invoice", "contract", "budget", "report",
-})
-_OFFICE_EXTS = frozenset({".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt", ".pdf"})
-
-# Which compliance rule a matched title/filename keyword implies -- same rule
-# vocabulary as classifier/src/dictionaries.py -- so the title heuristic can
-# hand the policy resolver a synthetic detection instead of an empty list
-# (which always falls back to the default policy regardless of the keyword).
-_KEYWORD_RULE: dict[str, str] = {
-    "confidential": "INTERNAL", "secret": "INTERNAL", "restricted": "INTERNAL",
-    "password": "INTERNAL", "internal": "INTERNAL", "dlp": "INTERNAL",
-    "contract": "INTERNAL", "budget": "INTERNAL", "report": "INTERNAL",
-    "salary": "GDPR", "payroll": "GDPR", "personal": "GDPR", "private": "GDPR",
-    "client": "GDPR", "customer": "GDPR", "tax": "GDPR",
-    "ssn": "HIPAA", "medical": "HIPAA",
-    "iban": "PCI-DSS", "carte": "PCI-DSS", "bancaire": "PCI-DSS",
-    "bank": "PCI-DSS", "account": "PCI-DSS", "invoice": "PCI-DSS",
-}
+# The name-based heuristic these two channels share -- a screenshot is pixels
+# and a print job is a driver's render, so neither has text to classify. Moved
+# out to title_heuristic.py when the print monitor became the second caller;
+# re-exported under the old private names so nothing that already reads them
+# has to care where they live now.
+from title_heuristic import (
+    KEYWORD_RULE as _KEYWORD_RULE,
+    OFFICE_EXTS as _OFFICE_EXTS,
+    SENSITIVE_FILENAME_KW as _SENSITIVE_FILENAME_KW,
+    SENSITIVE_KEYWORDS as _SENSITIVE_KEYWORDS,
+    is_sensitive as _is_sensitive,
+    matched_keyword as _matched_keyword,
+    synthetic_detection,
+)
 
 
 # ── Windows helpers ───────────────────────────────────────────────────────────
@@ -136,24 +117,6 @@ def _get_foreground_title() -> str:
         return ""
 
 
-def _matched_keyword(title: str) -> str | None:
-    """Return the sensitive keyword the title (or, for an Office file, its
-    filename) matched, or None if it doesn't look sensitive."""
-    lower = title.lower()
-    for kw in _SENSITIVE_KEYWORDS:
-        if kw in lower:
-            return kw
-    for ext in _OFFICE_EXTS:
-        if ext in lower:
-            filename_part = lower.split(" - ")[0].strip()
-            for kw in _SENSITIVE_FILENAME_KW:
-                if kw in filename_part:
-                    return kw
-    return None
-
-
-def _is_sensitive(title: str) -> bool:
-    return _matched_keyword(title) is not None
 
 
 def _clipboard_seq() -> int:
@@ -286,12 +249,7 @@ def _screenshot_loop(
             # than resolving against an empty list -- an empty list always
             # falls back to the default policy regardless of which keyword
             # actually matched.
-            detections = [{
-                "type":       "keyword",
-                "value":      matched_kw,
-                "rule":       _KEYWORD_RULE.get(matched_kw, "INTERNAL"),
-                "confidence": 0.6,
-            }]
+            detections = [synthetic_detection(matched_kw)]
             policy = (
                 policy_resolver.resolve(detections, channel="SCREENSHOT",
                                         risk_score=_TITLE_HEURISTIC_RISK)

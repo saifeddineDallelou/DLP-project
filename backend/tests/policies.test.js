@@ -189,6 +189,32 @@ describe('per-channel policy actions', () => {
     expect(res.body.error).toMatch(/only meaningful for data at rest/i);
   });
 
+  test('accepts a response for removable media and for print', async () => {
+    // Both were valid enum values long before anything enforced them. Now an
+    // agent actually carries these out, so a policy that sets them is a
+    // promise the endpoint keeps.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { USB: 'BLOCK', PRINT: 'ALERT' } });
+
+    expect(res.status).toBe(201);
+    expect(res.body.channelActions).toEqual({ USB: 'BLOCK', PRINT: 'ALERT' });
+  });
+
+  test('rejects QUARANTINE on removable media', async () => {
+    // A copy on a stick is taken back off the volume; there is no separate
+    // quarantine step to configure, and offering one would imply the file
+    // stays put.
+    const user = await admin();
+    const res = await request(app).post('/api/policies')
+      .set('Authorization', authHeader(user))
+      .send({ ...BASE, channelActions: { USB: 'QUARANTINE' } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only meaningful for data at rest/i);
+  });
+
   test('rejects an unknown channel', async () => {
     const user = await admin();
     const res = await request(app).post('/api/policies')
