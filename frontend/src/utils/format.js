@@ -1,9 +1,20 @@
-import { File, Clipboard, Usb, Printer, Camera, Network } from 'lucide-react';
+import { File, Upload, Clipboard, Usb, Printer, Camera, Network } from 'lucide-react';
 
 export const CHANNEL_ICON = {
-  FILE: File, CLIPBOARD: Clipboard, USB: Usb,
+  FILE: File, FILE_UPLOAD: Upload, CLIPBOARD: Clipboard, USB: Usb,
   PRINT: Printer, SCREENSHOT: Camera, NETWORK: Network,
 };
+
+// The channels an agent can actually report on, in the order a reader should
+// meet them. NETWORK is deliberately absent: it is a value the Channel enum
+// accepts and no monitor produces, so charting it only ever drew a row of
+// zeroes that read as "nothing happened here" rather than "nothing watches
+// this". FILE_UPLOAD was the opposite mistake -- a channel with real
+// incidents, left out of the breakdown because this list was written before
+// it existed and then copied into a second page.
+export const MONITORED_CHANNELS = [
+  'FILE', 'FILE_UPLOAD', 'CLIPBOARD', 'SCREENSHOT', 'USB', 'PRINT',
+];
 
 export function formatDate(dateStr) {
   if (!dateStr) return '—';

@@ -12,6 +12,8 @@ import {
   RISK_LEVEL_TONES,
   EVENT_TYPE_LABELS,
   PLATFORM_LABELS,
+  MONITORED_CHANNELS,
+  CHANNEL_ICON,
 } from './format.js';
 
 afterEach(() => vi.useRealTimers());
@@ -142,6 +144,33 @@ describe('tone maps cover every backend enum value', () => {
       'DEEPSEEK', 'HUGGINGFACE', 'YOU_COM', 'PI_AI', 'GROQ', 'COHERE', 'OTHER_AI',
     ]) {
       expect(PLATFORM_LABELS[p], `missing label for ${p}`).toBeDefined();
+    }
+  });
+});
+
+
+describe('MONITORED_CHANNELS', () => {
+  test('includes every channel a monitor actually reports on', () => {
+    // FILE_UPLOAD was missing from the Reports page's own copy of this list,
+    // so in-page upload blocks -- a channel with real incidents -- were left
+    // out of the breakdown entirely.
+    for (const ch of ['FILE', 'FILE_UPLOAD', 'CLIPBOARD', 'SCREENSHOT', 'USB', 'PRINT']) {
+      expect(MONITORED_CHANNELS).toContain(ch);
+    }
+  });
+
+  test('leaves out a channel nothing produces', () => {
+    // NETWORK is a value the enum accepts and no monitor emits. Charting it
+    // draws a row of zeroes that reads as "nothing happened here" rather than
+    // "nothing watches this".
+    expect(MONITORED_CHANNELS).not.toContain('NETWORK');
+  });
+
+  test('every monitored channel has an icon', () => {
+    // The table falls back to a generic file icon, so a missing entry made a
+    // blocked upload indistinguishable from a file found at rest.
+    for (const ch of MONITORED_CHANNELS) {
+      expect(CHANNEL_ICON[ch]).toBeTruthy();
     }
   });
 });

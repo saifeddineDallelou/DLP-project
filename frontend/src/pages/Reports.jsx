@@ -10,9 +10,9 @@ import PageHeader from '../components/PageHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
 import Spinner from '../components/Spinner.jsx';
 import EmptyState from '../components/EmptyState.jsx';
-import { formatDate, PLATFORM_LABELS } from '../utils/format.js';
+import { formatDate, PLATFORM_LABELS, MONITORED_CHANNELS } from '../utils/format.js';
 
-const CHANNELS = ['FILE', 'CLIPBOARD', 'USB', 'PRINT', 'SCREENSHOT', 'NETWORK'];
+const CHANNELS = MONITORED_CHANNELS;
 const SEVERITY_HEX = { LOW: '#2f9d5c', MEDIUM: '#ad8f1e', HIGH: '#c85a2e', CRITICAL: '#d03b3b' };
 
 function todayStr() {
