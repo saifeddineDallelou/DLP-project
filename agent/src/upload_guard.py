@@ -20,9 +20,14 @@ indistinguishable from the site being broken.
 
 from __future__ import annotations
 
+import base64
+import os
+import tempfile
+
 from loguru import logger
 
 from api_client import DLPApiClient
+from file_extractor import extract
 from evidence import safe_sample
 from repeat_window import RepeatWindow, fingerprint
 from review_prompt import offer_review
@@ -31,6 +36,23 @@ from review_prompt import offer_review
 # multi-megabyte classify round trip while a user waits on the page.
 _MAX_CLASSIFY = 5_000
 
+# A .xlsx or .pdf is a ZIP or a binary container: reading it as text in the
+# browser yields mojibake, so the extension used to skip those formats
+# entirely and every one of them uploaded unchecked. That is the format a
+# customer database is actually IN. The bytes come over instead, and the
+# agent's existing extractor -- the same one file_watcher uses -- reads them.
+#
+# Capped because the page is blocked waiting on this answer. A spreadsheet
+# worth stealing is far below this; a 200 MB video is not worth the wait, and
+# has nothing extractable in it anyway.
+_MAX_BLOB_BYTES = 8 * 1024 * 1024
+
+# Only formats the extractor actually understands. Writing an arbitrary upload
+# to disk to see what happens is not something this should do.
+_EXTRACTABLE_EXTS = frozenset({
+    ".pdf", ".docx", ".xlsx", ".pptx",
+})
+
 # Below this the classifier's own callers treat content as not worth acting
 # on, and matching them keeps one definition of "sensitive" across channels.
 _RISK_THRESHOLD = 0.5
@@ -38,17 +60,63 @@ _RISK_THRESHOLD = 0.5
 _REPEATS = RepeatWindow()
 
 
+def extract_blob(name: str, blob_b64: str) -> str:
+    """Read a binary container the browser could not read as text.
+
+    The bytes are written to a temp file because every extractor in
+    file_extractor works from a path -- python-docx, openpyxl and pypdf all
+    want a file, and reimplementing them against a buffer to avoid one write
+    would be a second copy of the hardest code here.
+
+    The temp file is deleted on every path including failure. It holds the
+    sensitive content this whole module exists to stop leaving, and leaving it
+    in %TEMP% would mean the DLP agent is the thing that dropped a copy of the
+    customer list somewhere world-readable.
+    """
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _EXTRACTABLE_EXTS:
+        return ""
+    try:
+        raw = base64.b64decode(blob_b64, validate=False)
+    except Exception as exc:
+        logger.warning(f"[UPLOAD] Could not decode '{name}': {exc}")
+        return ""
+    if not raw or len(raw) > _MAX_BLOB_BYTES:
+        return ""
+
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(suffix=ext, prefix="dlp-upload-")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        return extract(path) or ""
+    except Exception as exc:
+        logger.warning(f"[UPLOAD] Could not read '{name}': {exc}")
+        return ""
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def make_upload_check(client: DLPApiClient, agent_id: str, policy_resolver=None):
     """Build the callback browser_sensor hands page uploads to.
 
-    Returns (name, text, platform) -> bool, where True means "stop this".
+    Returns (name, text, platform, blob_b64) -> bool, where True means "stop
+    this".
     """
 
-    def _check(name: str, text: str, platform: str) -> bool:
+    def _check(name: str, text: str, platform: str, blob_b64: str = "") -> bool:
+        if not text.strip() and blob_b64:
+            # A container format. The browser cannot read it, the agent can.
+            text = extract_blob(name, blob_b64)
+
         if not text.strip():
-            # An image or binary the content script could not read as text.
-            # Saying "block" on no evidence would stop every avatar upload in
-            # the browser; this path only ever claims what it can show.
+            # An image, or a format nothing here can read. Saying "block" on
+            # no evidence would stop every avatar upload in the browser; this
+            # path only ever claims what it can show.
             return False
 
         result = client.classify(text=text[:_MAX_CLASSIFY])

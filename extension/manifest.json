@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DLP Browser Sensor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Tells the local DLP agent which AI platform tab is active, and stops sensitive files being attached to one. Reports a platform name and, for a file the user chooses to upload, its name and text \u2014 never page content, keystrokes or browsing history.",
   "permissions": [
     "tabs",

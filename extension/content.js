@@ -18,6 +18,12 @@
  * The filename and up to 5 KB of text, to 127.0.0.1 only, and only for a file
  * the user just chose to upload to an AI platform. Never page content, never
  * anything the user did not just hand to a third party themselves.
+ *
+ * Container formats -- .xlsx, .docx, .pptx, .pdf -- are sent as bytes
+ * instead, because they are ZIPs and binaries: reading one as text here
+ * produces mojibake, which is why they used to be skipped altogether. That
+ * skip was a hole the size of the problem, since a customer database is
+ * almost never a .txt. The agent has the extractors already; it reads them.
  */
 
 const ENDPOINT = "http://127.0.0.1:8765/upload";
@@ -29,6 +35,16 @@ const MAX_TEXT = 5000;
 // decoding megabytes of binary to hand back nothing wastes the seconds the
 // user is waiting.
 const TEXT_LIKE = /\.(txt|csv|tsv|json|xml|ya?ml|md|log|htm|html|sql|ini|cfg|conf|env|py|js|ts|java|c|cpp|cs|go|rb|php|sh|ps1)$/i;
+
+// Formats the agent's extractor understands but the browser cannot read.
+// Anything else binary -- an image, a video, an archive -- is still skipped:
+// there is nothing in it to classify and the user is waiting.
+const CONTAINER_LIKE = /\.(pdf|docx|xlsx|pptx)$/i;
+
+// Matches the agent's own cap. The page is blocked on this answer, so a file
+// larger than this is let through rather than made to wait -- a spreadsheet
+// worth stealing is a long way below it.
+const MAX_BYTES = 8 * 1024 * 1024;
 
 function platformFromHost() {
   const host = location.hostname.toLowerCase();
@@ -57,14 +73,34 @@ function readAsText(file) {
   });
 }
 
+function readAsBase64(file) {
+  return new Promise((resolve) => {
+    if (!CONTAINER_LIKE.test(file.name) || file.size > MAX_BYTES) return resolve("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const bytes = new Uint8Array(reader.result);
+      // Chunked: String.fromCharCode applied to a megabyte-long array at once
+      // overflows the argument stack and throws.
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      resolve(btoa(binary));
+    };
+    reader.onerror = () => resolve("");
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 async function shouldBlock(file, platform) {
   const text = await readAsText(file);
-  if (!text) return false;                 // nothing to judge on
+  const bytes = text ? "" : await readAsBase64(file);
+  if (!text && !bytes) return false;       // nothing to judge on
   try {
     const res = await fetch(ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: file.name, text, platform }),
+      body: JSON.stringify({ name: file.name, text, bytes, platform }),
     });
     if (!res.ok) return false;
     const body = await res.json();

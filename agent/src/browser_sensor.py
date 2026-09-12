@@ -69,6 +69,12 @@ _DEFAULT_PORT = int(os.environ.get("BROWSER_SENSOR_PORT", "8765"))
 # site could tell the agent an AI tab is open, or that none is.
 _ALLOWED_ORIGIN_PREFIXES = ("chrome-extension://", "moz-extension://", "extension://")
 
+# An upload of a container format arrives as base64, so a body is no longer a
+# few hundred bytes. Capped anyway: a Content-Length is a number a caller
+# chooses, and reading whatever it claims is how a loopback listener becomes a
+# way to exhaust the agent's memory.
+_MAX_BODY_BYTES = 12 * 1024 * 1024
+
 
 class _SensorState:
     """Latest report from the extension, and when it arrived."""
@@ -175,6 +181,11 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
+        if length > _MAX_BODY_BYTES:
+            # Still drained, up to the cap, so the connection returns a status
+            # rather than a reset -- then rejected by the handler below.
+            self.rfile.read(_MAX_BODY_BYTES)
+            return b""
         return self.rfile.read(length) if length > 0 else b""
 
     def do_POST(self) -> None:         # noqa: N802
@@ -236,8 +247,14 @@ class _Handler(BaseHTTPRequestHandler):
         name = body.get("name")
         text = body.get("text")
         platform = body.get("platform")
+        # `bytes` carries a base64 container the browser could not read as
+        # text -- a .xlsx or .pdf, which is the format a customer database is
+        # actually in. Optional: a text-like file still sends `text` alone.
+        blob = body.get("bytes")
         if not isinstance(name, str) or not isinstance(text, str):
             return self._json(400, {"error": "name and text must be strings"})
+        if blob is not None and not isinstance(blob, str):
+            return self._json(400, {"error": "bytes must be a base64 string"})
 
         if UPLOAD_CHECK is None:
             # No checker installed. Answering "block" would stop every upload
@@ -247,7 +264,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"block": False})
 
         try:
-            block = bool(UPLOAD_CHECK(name[:260], text, str(platform or "")))
+            block = bool(UPLOAD_CHECK(name[:260], text, str(platform or ""), blob or ""))
         except Exception as exc:
             # A classifier that is down must not wedge the browser: the page
             # is waiting on this answer before it lets the user continue.
@@ -257,7 +274,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, {"block": block})
 
 
-# Set by the agent at startup: (filename, text, platform) -> bool, "block it?"
+# Set by the agent at startup:
+#   (filename, text, platform, base64 bytes) -> bool, "block it?"
 #
 # A hook rather than an import, so this module stays a transport. It knows
 # about HTTP and about the extension; it has no opinion on what is sensitive,

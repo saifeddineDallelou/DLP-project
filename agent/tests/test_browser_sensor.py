@@ -203,7 +203,7 @@ class TestUploadEndpoint:
             return e.code, json.loads(e.read() or b"{}")
 
     def test_a_sensitive_upload_is_blocked(self, sensor):
-        browser_sensor.UPLOAD_CHECK = lambda name, text, plat: True
+        browser_sensor.UPLOAD_CHECK = lambda name, text, plat, blob="": True
         try:
             status, body = self._upload(sensor, {
                 "name": "cards.csv", "text": "4111", "platform": "OPENAI_CHATGPT"})
@@ -213,7 +213,7 @@ class TestUploadEndpoint:
         assert body["block"] is True
 
     def test_a_clean_upload_is_allowed(self, sensor):
-        browser_sensor.UPLOAD_CHECK = lambda name, text, plat: False
+        browser_sensor.UPLOAD_CHECK = lambda name, text, plat, blob="": False
         try:
             _status, body = self._upload(sensor, {
                 "name": "notes.txt", "text": "hello", "platform": "OPENAI_CHATGPT"})
@@ -224,7 +224,7 @@ class TestUploadEndpoint:
     def test_the_checker_receives_what_was_picked(self, sensor):
         seen = {}
 
-        def _check(name, text, plat):
+        def _check(name, text, plat, blob=""):
             seen.update(name=name, text=text, plat=plat)
             return False
 
@@ -275,6 +275,45 @@ class TestUploadEndpoint:
         finally:
             browser_sensor.UPLOAD_CHECK = None
         assert status == 400
+
+    def test_a_container_format_is_sent_as_bytes(self, sensor):
+        # A .xlsx is a ZIP. The browser cannot read it as text, so it used to
+        # be skipped entirely -- and that is the format a customer database is
+        # actually in.
+        seen = {}
+
+        def _check(name, text, plat, blob=""):
+            seen.update(name=name, text=text, blob=blob)
+            return True
+
+        browser_sensor.UPLOAD_CHECK = _check
+        try:
+            _status, body = self._upload(sensor, {
+                "name": "customers.xlsx", "text": "", "bytes": "UEsDBAo=",
+                "platform": "OPENAI_CHATGPT"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert body["block"] is True
+        assert seen["blob"] == "UEsDBAo="
+
+    def test_bytes_must_be_a_string(self, sensor):
+        browser_sensor.UPLOAD_CHECK = lambda *a: True
+        try:
+            status, _ = self._upload(sensor, {"name": "x", "text": "",
+                                              "bytes": {"not": "base64"}})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert status == 400
+
+    def test_a_text_only_upload_still_needs_no_bytes(self, sensor):
+        # The field is optional; the text path must not start demanding it.
+        browser_sensor.UPLOAD_CHECK = lambda name, text, plat, blob="": blob == ""
+        try:
+            _status, body = self._upload(sensor, {
+                "name": "cards.csv", "text": "4111", "platform": "OPENAI_CHATGPT"})
+        finally:
+            browser_sensor.UPLOAD_CHECK = None
+        assert body["block"] is True
 
     def test_the_tab_route_still_works(self, sensor):
         # Adding a route must not break the one the sensor already had.
