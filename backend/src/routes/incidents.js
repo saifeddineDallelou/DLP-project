@@ -2,6 +2,7 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { toEvent, forwardAsync } = require('../lib/siem');
+const { seal, open } = require('../lib/evidence-crypto');
 
 const router = express.Router();
 
@@ -13,12 +14,16 @@ const router = express.Router();
 // the database: this is captured content, and the column should not carry an
 // encoding promise the agent cannot keep. Replacement characters are
 // preferable to a 500 on one malformed row.
+//
+// Sealed on the way in, opened here -- see lib/evidence-crypto.js. Rows
+// written before encryption existed still read correctly; `open` tells them
+// apart by a version byte that cannot begin a line of readable text.
 function withReadableEvidence(incident) {
   if (!incident) return incident;
   const { evidence, ...rest } = incident;
   return {
     ...rest,
-    evidence: evidence ? Buffer.from(evidence).toString('utf8') : null,
+    evidence: evidence ? open(evidence) : null,
   };
 }
 
@@ -57,7 +62,7 @@ router.post('/', async (req, res, next) => {
         policyId,
         severity:     severity     ?? 'MEDIUM',
         channel:      channel,
-        evidence:     evidence     ? Buffer.from(String(evidence)) : undefined,
+        evidence:     evidence     ? seal(evidence) : undefined,
         evidenceType: evidenceType ?? (evidence ? 'text' : undefined),
         riskScore:    riskScore    ?? null,
         // What the agent DID, not what the policy says now.

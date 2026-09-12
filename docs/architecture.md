@@ -24,7 +24,7 @@ into four parts that can each change without touching the others.
                │ (pulled every 3 s)                │ (pushed after the fact)
    ┌───────────┴───────────────────────────────────▼──────────────────┐
    │  agent/        Python, Windows endpoint                          │
-   │                Watches 9 channels, decides, ENFORCES              │
+   │                Watches 11 channels, decides, ENFORCES             │
    └───────────────────────────────┬──────────────────────────────────┘
                                    │  POST /classify
    ┌───────────────────────────────▼──────────────────────────────────┐
@@ -220,7 +220,12 @@ main()
   ├── screenshot_monitor   clipboard-image poll
   ├── app_launch_monitor   psutil @ 15 s
   ├── file_dialog_monitor  window poll
-  └── app_file_monitor     periodic re-check
+  ├── app_file_monitor     periodic re-check
+  ├── drag_drop_monitor    poll @ 0.05 s  ─┐ hook swallows the drop;
+  ├── drop_interceptor     low-level hook ─┘ polling is the fallback
+  ├── browser_sensor       loopback listener, extension reports the active tab
+  ├── usb_monitor          drive table @ 2 s, then watchdog on the volume
+  └── print_monitor        spooler @ 0.5 s, each job paused while judged
         │
         └── all share ──► AgentState  (lock-guarded counters, flags,
                                        recently-flagged file list)
@@ -243,6 +248,8 @@ a Windows limitation rather than an oversight:
 | `file_dialog_monitor` | There is no global "a file was chosen in a dialog" event. It polls for window class `#32770` and reads the filename before the user confirms. |
 | `app_file_monitor` | Catching a process that opens a file *after* the filesystem event already fired would need ETW or a kernel driver. A periodic re-check narrows the gap to one poll interval. |
 | `drag_drop_monitor` | An OLE drop hands the file straight from Explorer to the browser through `IDropTarget::Drop`. Hooking that needs a DLL injected into the browser process — fragile across versions, and exactly what EDR software exists to flag. |
+| `usb_monitor` | Windows will not let a user-mode process veto a file write. Vetoing one needs a signed filesystem filter driver — a kernel component, installed with administrator rights. So the file is seen landing and taken back off the volume, which is a weaker guarantee and is recorded as the weaker claim: REMOVED, not blocked. |
+| `print_monitor` | A spooled job is the driver's own render, so its pages cannot be read without shipping a print processor. But the job CAN be paused, which turns the whole channel from a race into a decision: pause first, classify, then release or cancel. The document name often resolves to a real file, and then the content is classified like any other. |
 
 ### Cancelling a drag instead of intercepting a drop
 
@@ -445,8 +452,23 @@ Not every endpoint is authenticated the same way, and the split is intentional:
 
 Sensitive values are masked by the classifier **before** they ever reach the
 backend, so an incident record holds `****-****-****-4242`, never the card
-number. Evidence is stored as `Bytes` with an encryption key configured
-separately (`EVIDENCE_ENCRYPTION_KEY`).
+number.
+
+Evidence is then encrypted at rest with AES-256-GCM (`lib/evidence-crypto.js`),
+a fresh IV per row, keyed by `EVIDENCE_ENCRYPTION_KEY`. That sentence used to
+be here without the code behind it: the variable was in `.env.example` and the
+document said evidence was encrypted, while the column held plain UTF-8 and
+nothing read the key. A configuration flag that promises a control it does not
+implement is worse than no flag, because somebody relies on it without
+checking.
+
+What it protects is real but secondary -- filenames, window titles and already
+masked samples. Filenames alone tell an attacker which files are worth going
+after. Rows written before this existed are still readable: a version byte
+that cannot begin a line of text distinguishes sealed values from legacy
+plaintext, so no batch migration had to decrypt every row to succeed. With no
+key configured the backend stores plaintext and warns, rather than refusing to
+record incidents -- a config gap must not become a detection outage.
 
 That guarantee only holds because the agent reports *from the classifier's
 masked detections*, never from the raw content it inspected — see
