@@ -426,6 +426,9 @@ def _screenshot_loop(
                 channel="SCREENSHOT",
                 evidence=title[:255],
                 risk_score=_TITLE_HEURISTIC_RISK,
+                # Every other channel records what it did; without this the
+                # dashboard showed a blocked capture with an empty Action.
+                action_taken="BLOCK" if cleared else "ALERT",
             )
             if incident:
                 _REPEATS.opened("SCREENSHOT", incident.get("id"))

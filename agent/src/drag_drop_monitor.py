@@ -77,6 +77,11 @@ _KEYEVENTF_KEYUP = 0x0002
 # Idle sampling: fast enough to notice a drag starting without spinning a
 # core when nothing is happening.
 _POLL_INTERVAL = 0.05
+# How many polls to keep re-reading an empty Explorer selection after the
+# button goes down over an Explorer window (~300 ms). Long enough for Explorer
+# to select the file under the cursor, short enough that a plain click on empty
+# space is forgotten before the next one.
+_SELECTION_RETRIES = 6
 
 # Sampling once a SENSITIVE drag is in flight.
 #
@@ -205,6 +210,11 @@ class _DragState:
         self.active = False
         self.origin_hwnd = 0
         self.paths: list[str] = []
+        # Polls left to re-read an Explorer selection that came back empty.
+        # Explorer selects a file on mouse-down, but not before the first poll
+        # that sees the button down -- a press-and-drag on an unselected file
+        # read an empty selection and was never looked at again.
+        self.selection_retries = 0
         self.verdict: dict | None = None     # set by the classify worker
         self.handled = False                 # already blocked or reported
 
@@ -303,20 +313,27 @@ def _drag_loop(
             continue
 
         # ── Button just went down: is this a drag we can read? ─────────────
-        if not state.active:
-            state.active = True
-            x, y = _cursor_pos()
-            hwnd = _root_window_at(x, y)
-            if not hwnd or _class_name(hwnd) not in _EXPLORER_CLASSES:
-                # Not a readable drag source. Stay 'active' so this is not
-                # re-evaluated on every poll of the same click.
-                stop.wait(_POLL_INTERVAL)
-                continue
+        if not state.active or (state.selection_retries and not state.paths):
+            if not state.active:
+                state.active = True
+                x, y = _cursor_pos()
+                hwnd = _root_window_at(x, y)
+                if not hwnd or _class_name(hwnd) not in _EXPLORER_CLASSES:
+                    # Not a readable drag source. Stay 'active' so this is not
+                    # re-evaluated on every poll of the same click.
+                    stop.wait(_POLL_INTERVAL)
+                    continue
+                state.origin_hwnd = hwnd
+                state.selection_retries = _SELECTION_RETRIES
+            else:
+                hwnd = state.origin_hwnd
+                state.selection_retries -= 1
 
             paths = _explorer_selection(hwnd)
             if not paths:
                 stop.wait(_POLL_INTERVAL)
                 continue
+            state.selection_retries = 0
 
             state.origin_hwnd = hwnd
             state.paths = paths
